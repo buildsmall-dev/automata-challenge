@@ -1,0 +1,191 @@
+name: distributed-systems-interview
+
+services:
+  postgres:
+    image: postgres:15.19-alpine
+    environment:
+      POSTGRES_USER: lab_admin
+      POSTGRES_PASSWORD: lab_password
+      POSTGRES_DB: lab_default
+    ports:
+      - "127.0.0.1:5452:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      lab-network:
+        ipv4_address: 172.31.250.10
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U lab_admin -d lab_default"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  nats:
+    image: nats:2.10.29-alpine
+    # -js turns JetStream on.
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "127.0.0.1:4242:4222"
+      - "127.0.0.1:8242:8222"
+    volumes:
+      - nats_data:/data
+    networks:
+      lab-network:
+        ipv4_address: 172.31.250.11
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -S -O /dev/null http://127.0.0.1:8222/healthz 2>&1 | grep -q '200 OK'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # S3-compatible object storage, for instrument data. No authentication.
+  storage:
+    image: chrislusf/seaweedfs:3.62
+    command: ["server", "-dir=/data", "-s3", "-s3.port=8333", "-volume.max=30", "-master.volumeSizeLimitMB=32"]
+    ports:
+      - "127.0.0.1:8343:8333"
+    volumes:
+      - storage_data:/data
+    networks:
+      lab-network:
+        ipv4_address: 172.31.250.12
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8333/status"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  executor:
+    restart: on-failure
+    build:
+      context: .
+      dockerfile: services/executor/Dockerfile
+    ports:
+      - "127.0.0.1:5002:5001"
+    environment:
+      - DATABASE_URL=postgresql://lab_admin:lab_password@postgres:5432/executor_db?sslmode=disable
+      - NATS_URL=nats://nats:4222
+      - S3_ENDPOINT=http://storage:8333
+      - S3_BUCKET=lab-data
+      - WORKFLOWS_FILE=/app/config/workflows.yaml
+    volumes:
+      # Directory mount, not a single file -- editors that save by rename would
+      # silently detach a file mount.
+      - ./config:/app/config:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+      nats: {condition: service_healthy}
+      storage: {condition: service_healthy}
+    networks:
+      lab-network:
+        ipv4_address: 172.31.250.20
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:5001/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  liquid-handler-1:
+    restart: on-failure
+    build: &driver-build
+      context: .
+      dockerfile: services/driver/Dockerfile
+    ports:
+      - "127.0.0.1:7101:7000"
+    environment:
+      - WORKER_ID=liquid-handler-1
+      - NATS_URL=nats://nats:4222
+      - S3_ENDPOINT=http://storage:8333
+      - S3_BUCKET=lab-data
+      - STEP_DURATION=2s
+      - FAIL_PCT=${LH_FAIL_PCT:-0}
+      - HANG_PCT=${LH_HANG_PCT:-0}
+      - HANG_DURATION=${HANG_DURATION:-30s}
+      - CHAOS_SEED=${CHAOS_SEED:-0}
+      # A part-dispensed plate cannot safely be dispensed again.
+      - FAILURES_RETRYABLE=false
+      - PRODUCES_DATA=false
+    volumes:
+      - ledger:/ledger
+    depends_on: &driver-deps
+      nats: {condition: service_healthy}
+      storage: {condition: service_healthy}
+    networks:
+      lab-network:
+        ipv4_address: 172.31.250.21
+    healthcheck: &driver-health
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:7000/status"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  incubator-1:
+    restart: on-failure
+    build: *driver-build
+    ports:
+      - "127.0.0.1:7102:7000"
+    environment:
+      - WORKER_ID=incubator-1
+      - NATS_URL=nats://nats:4222
+      - S3_ENDPOINT=http://storage:8333
+      - S3_BUCKET=lab-data
+      - STEP_DURATION=2s
+      - FAIL_PCT=${INC_FAIL_PCT:-0}
+      - HANG_PCT=${INC_HANG_PCT:-0}
+      - HANG_DURATION=${HANG_DURATION:-30s}
+      - CHAOS_SEED=${CHAOS_SEED:-0}
+      # Re-incubating is safe.
+      - FAILURES_RETRYABLE=true
+      - PRODUCES_DATA=false
+    volumes:
+      - ledger:/ledger
+    depends_on: *driver-deps
+    networks:
+      lab-network:
+        ipv4_address: 172.31.250.22
+    healthcheck: *driver-health
+
+  plate-reader-1:
+    restart: on-failure
+    build: *driver-build
+    ports:
+      - "127.0.0.1:7103:7000"
+    environment:
+      - WORKER_ID=plate-reader-1
+      - NATS_URL=nats://nats:4222
+      - S3_ENDPOINT=http://storage:8333
+      - S3_BUCKET=lab-data
+      - STEP_DURATION=2s
+      - FAIL_PCT=${PR_FAIL_PCT:-0}
+      - HANG_PCT=${PR_HANG_PCT:-0}
+      - HANG_DURATION=${HANG_DURATION:-30s}
+      - CHAOS_SEED=${CHAOS_SEED:-0}
+      # Re-reading is safe.
+      - FAILURES_RETRYABLE=true
+      # Each read produces a data file.
+      - PRODUCES_DATA=true
+    volumes:
+      - ledger:/ledger
+    depends_on: *driver-deps
+    networks:
+      lab-network:
+        ipv4_address: 172.31.250.23
+    healthcheck: *driver-health
+
+volumes:
+  postgres_data:
+  nats_data:
+  storage_data:
+  ledger:
+
+networks:
+  lab-network:
+    driver: bridge
+    # Every service has a fixed address, outside the range Docker hands out,
+    # so scripts/chaos.sh can put a disconnected service back where it was --
+    # a partition, not a new machine.
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
+          ip_range: 172.31.250.128/25

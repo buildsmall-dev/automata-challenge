@@ -1,0 +1,13 @@
+.env
+*.log
+
+# compiled binaries -- `go build ./...` drops these here
+/executor
+/driver
+
+# Go build and test output
+*.exe
+*.test
+*.out
+go.work
+go.work.sum
