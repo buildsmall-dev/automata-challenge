@@ -487,8 +487,16 @@ func TestReplayFindsAReadThatWasStored(t *testing.T) {
 	}
 }
 
+// shortGrace stands in for the time an old process's upload could still land.
+func shortGrace(t *testing.T, d time.Duration) {
+	old := uploadGrace
+	uploadGrace = d
+	t.Cleanup(func() { uploadGrace = old })
+}
+
 // The bytes were only in the old process: a completed read with no object is lost.
 func TestReplayReportsAReadWhoseDataIsGone(t *testing.T) {
+	shortGrace(t, 300*time.Millisecond)
 	st := testStorage(t)
 	job := uniqueRun() + "/read_plate/1"
 	cfg := before(t, instrument.Config{ProducesData: true}, func(in *instrument.Instrument) { runJob(t, in, job) })
@@ -522,5 +530,39 @@ func TestReplayLeavesNewJobsAlone(t *testing.T) {
 	es := r.events(3, 5*time.Second)
 	if eventFor(es, cmd.JobID, protocol.KindDataLost) != nil {
 		t.Fatalf("a new read was reported lost: %v", kinds(es))
+	}
+}
+
+// The old process's upload lands just after the restart (Codex on R1): absent
+// at first is not lost.
+func TestReplayWaitsForAnUploadStillInFlight(t *testing.T) {
+	shortGrace(t, 1500*time.Millisecond)
+	st := testStorage(t)
+	job := uniqueRun() + "/read_plate/1"
+	var data []byte
+	cfg := before(t, instrument.Config{ProducesData: true}, func(in *instrument.Instrument) { data = runJob(t, in, job).Data })
+	r := newRig(t, cfg, true, st)
+	time.Sleep(300 * time.Millisecond) // replay has seen no object by now
+	if _, err := st.Put(context.Background(), protocol.DataKey(job), data); err != nil {
+		t.Fatal(err)
+	}
+	es := r.events(3, 5*time.Second)
+	if eventFor(es, job, protocol.KindDataLost) != nil || eventFor(es, job, protocol.KindStored) == nil {
+		t.Fatalf("events = %v, want stored and no data_lost", kinds(es))
+	}
+}
+
+// A read waiting on storage does not hold back how other jobs ended (Codex on R1).
+func TestReplayReportsOutcomesWhileStorageIsDown(t *testing.T) {
+	down, _ := storage.New("http://127.0.0.1:1", "lab-data-test")
+	read, later := uniqueRun()+"/read_plate/1", uniqueRun()+"/read_plate/1"
+	cfg := before(t, instrument.Config{ProducesData: true}, func(in *instrument.Instrument) {
+		runJob(t, in, read)
+		runJob(t, in, later)
+	})
+	r := newRig(t, cfg, true, down)
+	es := r.events(4, 3*time.Second)
+	if eventFor(es, read, protocol.KindFinished) == nil || eventFor(es, later, protocol.KindFinished) == nil {
+		t.Fatalf("events = %v, want finished for both jobs", kinds(es))
 	}
 }

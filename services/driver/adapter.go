@@ -21,6 +21,11 @@ const (
 	ledgerPoll   = 50 * time.Millisecond
 )
 
+// uploadGrace: an upload the last process sent just before it died can still
+// land after this one starts. Absence is only believed once this long has
+// passed since start, longer than any of its requests could have lasted.
+var uploadGrace = 2 * storage.RequestTimeout
+
 // Serve is the driver side of the work. This file is yours.
 //
 // It connects one instrument to the rest of the system. It is called once when
@@ -39,7 +44,7 @@ func Serve(ctx context.Context, inst *instrument.Instrument, nc *nats.Conn, st *
 	if err != nil {
 		return err
 	}
-	d := &driver{inst: inst, nc: nc, js: js, st: st, device: inst.DeviceID()}
+	d := &driver{inst: inst, nc: nc, js: js, st: st, device: inst.DeviceID(), believeAbsent: time.Now().Add(uploadGrace)}
 	// Taken before any command is heard, so every job in it ended (or was cut
 	// off) under an earlier process, and none is this process's to upload.
 	earlier := inst.Status().Executions
@@ -49,8 +54,10 @@ func Serve(ctx context.Context, inst *instrument.Instrument, nc *nats.Conn, st *
 	}
 	defer sub.Unsubscribe()
 	log.Printf("driver %s: listening on %s", d.device, protocol.RunSubject(d.device))
-	go d.replay(ctx, earlier)
+	replayed := make(chan struct{})
+	go func() { defer close(replayed); d.replay(ctx, earlier) }()
 	<-ctx.Done()
+	<-replayed
 	return ctx.Err()
 }
 
@@ -60,6 +67,8 @@ type driver struct {
 	js     jetstream.JetStream
 	st     *storage.Storage
 	device string
+
+	believeAbsent time.Time // see uploadGrace
 
 	mu      sync.Mutex
 	current string // the job accepted and not yet reported; at most one
@@ -133,8 +142,10 @@ func (d *driver) execute(ctx context.Context, cmd protocol.RunCommand) {
 // last process may have died before reporting any of it (K18, K32): events
 // were not acked, or a read's bytes went with it. Repeats are harmless: the
 // msg id lets JetStream drop one inside its window, and the executor's
-// lifecycle ignores one after it.
+// lifecycle ignores one after it. Every outcome goes first, so a storage
+// outage holds back only what depends on storage.
 func (d *driver) replay(ctx context.Context, ledger []instrument.Execution) {
+	var reads []string
 	for _, e := range ledger {
 		if e.Outcome == instrument.OutcomeRunning || e.FinishedAt == nil {
 			continue
@@ -142,14 +153,18 @@ func (d *driver) replay(ctx context.Context, ledger []instrument.Execution) {
 		d.publish(ctx, protocol.Event{Kind: protocol.KindStarted, JobID: e.JobID, StartedAt: ledgerTime(e.StartedAt)})
 		d.publish(ctx, finishedEvent(e))
 		if e.Outcome == instrument.OutcomeCompleted && d.inst.ProducesData() {
-			d.recoverData(ctx, e.JobID)
+			reads = append(reads, e.JobID)
 		}
+	}
+	for _, job := range reads {
+		d.recoverData(ctx, job)
 	}
 }
 
 // recoverData says what became of a read whose bytes this process never had:
-// stored if the object is there, data_lost if storage says it is not. Storage
-// not answering says neither, so it is asked again.
+// stored if the object is there, data_lost if storage still says it is not
+// once uploadGrace has passed. Storage not answering says neither, so it is
+// asked again.
 func (d *driver) recoverData(ctx context.Context, jobID string) {
 	if d.st == nil {
 		return
@@ -164,6 +179,8 @@ func (d *driver) recoverData(ctx context.Context, jobID string) {
 		case ok:
 			d.publish(ctx, protocol.Event{Kind: protocol.KindStored, JobID: jobID, Ref: d.st.Ref(key)})
 			return
+		case time.Now().Before(d.believeAbsent):
+			sleep(ctx, time.Until(d.believeAbsent)) // then ask once more
 		default:
 			log.Printf("driver %s: data of %s was never stored and is gone", d.device, jobID)
 			d.publish(ctx, protocol.Event{Kind: protocol.KindDataLost, JobID: jobID})
