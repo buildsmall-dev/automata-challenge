@@ -29,3 +29,8 @@ that finds them. These get solved later, or written up in NOTES.md §5 if we don
 | K22 | `LAB_EVENTS` keeps everything (no `MaxAge`/limits) | Disk on a long-lived NATS | Set retention once replay needs (R1) are known |
 | K23 | A Term'd (malformed) event is only logged; there is no dead-letter place to inspect it later | Debugging a misbehaving driver | Advisory or a DLQ stream if it shows up |
 | K24 | Claims are handled one at a time per executor (one subscription); a slow database delays every claim, and drivers keep asking | DB latency spikes | Fine at three devices; worker pool if needed |
+| K25 | A step claimed but never started (driver died after the claim), or hung, keeps its run `running` forever | Driver crashes, instrument hangs | **S7** reconcile / hang-retry `/decide` |
+| K26 | A late `DataStored` after `DataLost` turns a failed read into completed, after its run was already finished as failed | Storage slow enough that the driver gave up on it | Re-evaluate a finished run when a step changes, or freeze evidence once a run ends |
+| K27 | Steps after a failed one stay `pending` in a failed run (never sent, so true, but a reader may expect `cancelled`) | API/GraphQL readers | GraphQL: say why a step never ran |
+| K28 | Every 500ms the loop rescans all running runs, one query per run | Many concurrent runs | Fine at this scale; one joined query or LISTEN/NOTIFY if it shows |
+| K29 | Runs that share a device only retry on `busy`; no fairness or queueing across runs | Several runs at once on one instrument | Out of scope unless chaos shows starvation |
