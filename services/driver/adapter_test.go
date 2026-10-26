@@ -50,7 +50,9 @@ func newRig(t *testing.T, cfg instrument.Config, withStream bool, st ...*storage
 	js, _ := jetstream.New(nc)
 
 	cfg.DeviceID = "test-device"
-	cfg.LedgerDir = t.TempDir()
+	if cfg.LedgerDir == "" {
+		cfg.LedgerDir = t.TempDir()
+	}
 	cfg.Seed = "0"
 	if cfg.Duration == 0 {
 		cfg.Duration = 50 * time.Millisecond
@@ -389,5 +391,136 @@ func TestNoStoredEventWithoutStorage(t *testing.T) {
 	}
 	if got := r.send(protocol.NewRunCommand(uniqueRun(), "read_plate", 1)); got != protocol.RunBusy {
 		t.Errorf("another job while the data is unstored = %s, want busy", got)
+	}
+}
+
+// before builds a ledger the way an earlier process of this driver left it:
+// the instrument ran jobs, and the process went away before reporting them.
+func before(t *testing.T, cfg instrument.Config, run func(*instrument.Instrument)) instrument.Config {
+	t.Helper()
+	cfg.DeviceID, cfg.Seed, cfg.LedgerDir = "test-device", "0", t.TempDir()
+	if cfg.Duration == 0 {
+		cfg.Duration = 50 * time.Millisecond
+	}
+	cfg.HangDuration = time.Hour
+	inst, err := instrument.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run(inst)
+	cfg.HangPct = 0
+	return cfg
+}
+
+func runJob(t *testing.T, inst *instrument.Instrument, jobID string) instrument.Outcome {
+	t.Helper()
+	out, err := inst.Run(context.Background(), instrument.Job{JobID: jobID, RunID: "run-x", StepName: "read_plate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func eventFor(es []event, job string, kind protocol.Kind) *event {
+	for i := range es {
+		if es[i].JobID == job && es[i].Kind == kind {
+			return &es[i]
+		}
+	}
+	return nil
+}
+
+// A restarted driver reports how every job in its ledger ended, from the
+// ledger, without being asked and without claiming anything.
+func TestReplayReportsWhatTheLedgerSays(t *testing.T) {
+	job := uniqueRun() + "/fill/1"
+	cfg := before(t, instrument.Config{}, func(in *instrument.Instrument) { runJob(t, in, job) })
+	r := newRig(t, cfg, true)
+	asked := r.claimer(protocol.ClaimGo)
+	es := r.events(2, 3*time.Second)
+	fin := eventFor(es, job, protocol.KindFinished)
+	if eventFor(es, job, protocol.KindStarted) == nil || fin == nil || fin.Outcome != instrument.OutcomeCompleted {
+		t.Fatalf("events after restart = %+v, want started and finished(completed) for %s", es, job)
+	}
+	if fin.msgID != protocol.MsgID(job, protocol.KindFinished) {
+		t.Errorf("replayed finished has msg id %q; the same id as the first report lets JetStream drop a repeat", fin.msgID)
+	}
+	if len(*asked) != 0 {
+		t.Errorf("replay asked to claim %v", *asked)
+	}
+}
+
+// A job cut off by the restart is in the ledger as hung: report that, so the
+// step is unresolved rather than running for ever.
+func TestReplayReportsAJobCutOffByTheRestart(t *testing.T) {
+	job := uniqueRun() + "/fill/1"
+	cfg := before(t, instrument.Config{HangPct: 100}, func(in *instrument.Instrument) {
+		go in.Run(context.Background(), instrument.Job{JobID: job, RunID: "run-x", StepName: "fill"})
+		for in.Status().CurrentJobID != job {
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+	r := newRig(t, cfg, true)
+	es := r.events(2, 3*time.Second)
+	if fin := eventFor(es, job, protocol.KindFinished); fin == nil || fin.Outcome != instrument.OutcomeHung {
+		t.Fatalf("events = %+v, want finished(hung) for %s", es, job)
+	}
+}
+
+func TestReplayFindsAReadThatWasStored(t *testing.T) {
+	st := testStorage(t)
+	job := uniqueRun() + "/read_plate/1"
+	cfg := before(t, instrument.Config{ProducesData: true}, func(in *instrument.Instrument) {
+		out := runJob(t, in, job)
+		if _, err := st.Put(context.Background(), protocol.DataKey(job), out.Data); err != nil {
+			t.Fatal(err)
+		}
+		// ...and the process died before publishing stored.
+	})
+	r := newRig(t, cfg, true, st)
+	es := r.events(3, 3*time.Second)
+	if ev := eventFor(es, job, protocol.KindStored); ev == nil || ev.Ref != st.Ref(protocol.DataKey(job)) {
+		t.Fatalf("events = %v, want stored with ref %s", kinds(es), st.Ref(protocol.DataKey(job)))
+	}
+	if eventFor(es, job, protocol.KindDataLost) != nil {
+		t.Error("a stored read was reported lost")
+	}
+}
+
+// The bytes were only in the old process: a completed read with no object is lost.
+func TestReplayReportsAReadWhoseDataIsGone(t *testing.T) {
+	st := testStorage(t)
+	job := uniqueRun() + "/read_plate/1"
+	cfg := before(t, instrument.Config{ProducesData: true}, func(in *instrument.Instrument) { runJob(t, in, job) })
+	r := newRig(t, cfg, true, st)
+	es := r.events(3, 3*time.Second)
+	if eventFor(es, job, protocol.KindDataLost) == nil || eventFor(es, job, protocol.KindStored) != nil {
+		t.Fatalf("events = %v, want data_lost and no stored", kinds(es))
+	}
+}
+
+// No answer from storage is not evidence that the data is gone.
+func TestReplaySaysNothingAboutDataStorageCannotSee(t *testing.T) {
+	down, _ := storage.New("http://127.0.0.1:1", "lab-data-test")
+	job := uniqueRun() + "/read_plate/1"
+	cfg := before(t, instrument.Config{ProducesData: true}, func(in *instrument.Instrument) { runJob(t, in, job) })
+	r := newRig(t, cfg, true, down)
+	es := r.events(3, 1500*time.Millisecond)
+	if eventFor(es, job, protocol.KindFinished) == nil || eventFor(es, job, protocol.KindDataLost) != nil || eventFor(es, job, protocol.KindStored) != nil {
+		t.Fatalf("events = %v, want finished only", kinds(es))
+	}
+}
+
+// Only the ledger as it was at start is replayed: a read that starts after the
+// restart is still being uploaded by its own path and must not be called lost.
+func TestReplayLeavesNewJobsAlone(t *testing.T) {
+	st := testStorage(t)
+	r := newRig(t, instrument.Config{ProducesData: true}, true, st)
+	r.claimer(protocol.ClaimGo)
+	cmd := protocol.NewRunCommand(uniqueRun(), "read_plate", 1)
+	r.send(cmd)
+	es := r.events(3, 5*time.Second)
+	if eventFor(es, cmd.JobID, protocol.KindDataLost) != nil {
+		t.Fatalf("a new read was reported lost: %v", kinds(es))
 	}
 }

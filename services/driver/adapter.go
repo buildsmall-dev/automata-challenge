@@ -40,12 +40,16 @@ func Serve(ctx context.Context, inst *instrument.Instrument, nc *nats.Conn, st *
 		return err
 	}
 	d := &driver{inst: inst, nc: nc, js: js, st: st, device: inst.DeviceID()}
+	// Taken before any command is heard, so every job in it ended (or was cut
+	// off) under an earlier process, and none is this process's to upload.
+	earlier := inst.Status().Executions
 	sub, err := nc.Subscribe(protocol.RunSubject(d.device), func(m *nats.Msg) { d.onRun(ctx, m) })
 	if err != nil {
 		return err
 	}
 	defer sub.Unsubscribe()
 	log.Printf("driver %s: listening on %s", d.device, protocol.RunSubject(d.device))
+	go d.replay(ctx, earlier)
 	<-ctx.Done()
 	return ctx.Err()
 }
@@ -114,12 +118,7 @@ func (d *driver) execute(ctx context.Context, cmd protocol.RunCommand) {
 	if !ok {
 		return
 	}
-	ev := protocol.Event{Kind: protocol.KindFinished, JobID: cmd.JobID, Outcome: done.Outcome, Error: done.Error,
-		StartedAt: ledgerTime(done.StartedAt), FinishedAt: ledgerTime(*done.FinishedAt)}
-	if done.DataSHA256 != nil {
-		ev.SHA = *done.DataSHA256
-	}
-	d.publish(ctx, ev)
+	d.publish(ctx, finishedEvent(done))
 
 	if done.Outcome == instrument.OutcomeCompleted && d.inst.ProducesData() {
 		select {
@@ -128,6 +127,58 @@ func (d *driver) execute(ctx context.Context, cmd protocol.RunCommand) {
 		case <-ctx.Done():
 		}
 	}
+}
+
+// replay reports, once on start, how each job in the earlier ledger ended. The
+// last process may have died before reporting any of it (K18, K32): events
+// were not acked, or a read's bytes went with it. Repeats are harmless: the
+// msg id lets JetStream drop one inside its window, and the executor's
+// lifecycle ignores one after it.
+func (d *driver) replay(ctx context.Context, ledger []instrument.Execution) {
+	for _, e := range ledger {
+		if e.Outcome == instrument.OutcomeRunning || e.FinishedAt == nil {
+			continue
+		}
+		d.publish(ctx, protocol.Event{Kind: protocol.KindStarted, JobID: e.JobID, StartedAt: ledgerTime(e.StartedAt)})
+		d.publish(ctx, finishedEvent(e))
+		if e.Outcome == instrument.OutcomeCompleted && d.inst.ProducesData() {
+			d.recoverData(ctx, e.JobID)
+		}
+	}
+}
+
+// recoverData says what became of a read whose bytes this process never had:
+// stored if the object is there, data_lost if storage says it is not. Storage
+// not answering says neither, so it is asked again.
+func (d *driver) recoverData(ctx context.Context, jobID string) {
+	if d.st == nil {
+		return
+	}
+	key := protocol.DataKey(jobID)
+	for ctx.Err() == nil {
+		ok, err := d.st.Exists(ctx, key)
+		switch {
+		case err != nil:
+			log.Printf("driver %s: check data of %s: %v; asking again", d.device, jobID, err)
+			sleep(ctx, retryEvery)
+		case ok:
+			d.publish(ctx, protocol.Event{Kind: protocol.KindStored, JobID: jobID, Ref: d.st.Ref(key)})
+			return
+		default:
+			log.Printf("driver %s: data of %s was never stored and is gone", d.device, jobID)
+			d.publish(ctx, protocol.Event{Kind: protocol.KindDataLost, JobID: jobID})
+			return
+		}
+	}
+}
+
+func finishedEvent(e instrument.Execution) protocol.Event {
+	ev := protocol.Event{Kind: protocol.KindFinished, JobID: e.JobID, Outcome: e.Outcome, Error: e.Error,
+		StartedAt: ledgerTime(e.StartedAt), FinishedAt: ledgerTime(*e.FinishedAt)}
+	if e.DataSHA256 != nil {
+		ev.SHA = *e.DataSHA256
+	}
+	return ev
 }
 
 // run is one call of the instrument's Run; done closes when it returns.
