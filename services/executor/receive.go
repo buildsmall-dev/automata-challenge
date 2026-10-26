@@ -91,10 +91,10 @@ func (e *Executor) onClaim(m *nats.Msg) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	reply := protocol.ClaimReply{V: protocol.Version, Result: protocol.ClaimAbort}
-	s, _, err := e.applyToJob(ctx, req.JobID, Claimed{JobID: req.JobID})
+	s, _, err := e.applyToJob(ctx, req.Device, req.JobID, Claimed{JobID: req.JobID})
 	switch {
 	case errors.Is(err, ErrUnknownJob):
-		reply.Reason = "unknown job"
+		reply.Reason = "unknown job for " + req.Device
 	case err != nil:
 		log.Printf("executor: claim of %s by %s: %v; not answering", req.JobID, req.Device, err)
 		return
@@ -127,10 +127,10 @@ func (e *Executor) onEvent(m jetstream.Msg) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, _, err = e.applyToJob(ctx, ev.JobID, f)
+	_, _, err = e.applyToJob(ctx, ev.Device, ev.JobID, f)
 	switch {
 	case errors.Is(err, ErrUnknownJob):
-		log.Printf("executor: %s event for unknown job %s; dropping", ev.Kind, ev.JobID)
+		log.Printf("executor: %s event from %s for unknown job %s; dropping", ev.Kind, ev.Device, ev.JobID)
 		m.Ack()
 	case err != nil:
 		log.Printf("executor: %s event for %s: %v; will retry", ev.Kind, ev.JobID, err)

@@ -97,9 +97,17 @@ func stepView(t *testing.T, e *Executor, runID, name string) StepView {
 	return StepView{}
 }
 
+// deviceOf is the device testWorkflow assigns to a job's step.
+func deviceOf(jobID string) string {
+	if strings.Contains(jobID, "/read_plate/") {
+		return "plate-reader-1"
+	}
+	return "liquid-handler-1"
+}
+
 func mustApply(t *testing.T, e *Executor, jobID string, f Fact) Step {
 	t.Helper()
-	s, _, err := e.applyToJob(context.Background(), jobID, f)
+	s, _, err := e.applyToJob(context.Background(), deviceOf(jobID), jobID, f)
 	if err != nil {
 		t.Fatalf("apply %T: %v", f, err)
 	}
@@ -176,10 +184,10 @@ func TestStoreApplyIsIdempotent(t *testing.T) {
 	jobID := rv.ID + "/fill/1"
 	e.applyToStep(context.Background(), rv.ID, "fill", Dispatched{JobID: jobID, Attempt: 1})
 	f := Finished{JobID: jobID, Outcome: OutcomeCompleted, StartedAt: time.Now(), FinishedAt: time.Now()}
-	if _, changed, _ := e.applyToJob(context.Background(), jobID, f); !changed {
+	if _, changed, _ := e.applyToJob(context.Background(), deviceOf(jobID), jobID, f); !changed {
 		t.Fatal("first apply reported no change")
 	}
-	if _, changed, _ := e.applyToJob(context.Background(), jobID, f); changed {
+	if _, changed, _ := e.applyToJob(context.Background(), deviceOf(jobID), jobID, f); changed {
 		t.Error("second apply of the same fact reported a change")
 	}
 }
@@ -187,7 +195,7 @@ func TestStoreApplyIsIdempotent(t *testing.T) {
 func TestStoreUnknownJob(t *testing.T) {
 	e := NewExecutor(testDB(t), nil, nil)
 	newRun(t, e)
-	_, _, err := e.applyToJob(context.Background(), "run-nope/fill/1", Claimed{JobID: "run-nope/fill/1"})
+	_, _, err := e.applyToJob(context.Background(), "liquid-handler-1", "run-nope/fill/1", Claimed{JobID: "run-nope/fill/1"})
 	if !errors.Is(err, ErrUnknownJob) {
 		t.Errorf("err = %v, want ErrUnknownJob", err)
 	}
@@ -212,7 +220,7 @@ func TestStoreClaimAndCancelRace(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-ready
-			claimSaw, _, claimErr = e.applyToJob(ctx, jobID, Claimed{JobID: jobID})
+			claimSaw, _, claimErr = e.applyToJob(ctx, deviceOf(jobID), jobID, Claimed{JobID: jobID})
 		}()
 		go func() {
 			defer wg.Done()

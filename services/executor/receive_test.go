@@ -62,7 +62,12 @@ func (h *harness) dispatch(rv RunView, step string) string {
 
 func (h *harness) claim(jobID string) protocol.ClaimReply {
 	h.t.Helper()
-	b, _ := json.Marshal(protocol.ClaimRequest{V: protocol.Version, JobID: jobID, Device: "liquid-handler-1"})
+	return h.claimAs(deviceOf(jobID), jobID)
+}
+
+func (h *harness) claimAs(device, jobID string) protocol.ClaimReply {
+	h.t.Helper()
+	b, _ := json.Marshal(protocol.ClaimRequest{V: protocol.Version, JobID: jobID, Device: device})
 	msg, err := h.nc.Request(protocol.ClaimSubject, b, 2*time.Second)
 	if err != nil {
 		h.t.Fatalf("claim %s: %v", jobID, err)
@@ -154,6 +159,10 @@ func TestClaimRepliesFromTheRecord(t *testing.T) {
 	rv := newRun(t, h.e)
 
 	fill := h.dispatch(rv, "fill")
+	// Misrouted: only the assigned instrument may run a step.
+	if r := h.claimAs("incubator-1", fill); r.Result != protocol.ClaimAbort {
+		t.Fatalf("claim by another device = %+v, want abort", r)
+	}
 	if r := h.claim(fill); r.Result != protocol.ClaimGo {
 		t.Fatalf("claim of a dispatched step = %+v, want go", r)
 	}
@@ -212,6 +221,13 @@ func TestBadEventsAreDroppedAndGoodOnesStillApply(t *testing.T) {
 		return e
 	}())
 	h.publish("lab.incubator-1.evt.finished", wrong, "bad-3")
+	// Consistent with its subject, but from a device the step is not assigned to.
+	other, _ := json.Marshal(func() protocol.Event {
+		e := finished(job, at)
+		e.V, e.Device, e.Outcome = protocol.Version, "incubator-1", "failed"
+		return e
+	}())
+	h.publish(protocol.EventSubject("incubator-1", protocol.KindFinished), other, "bad-4")
 	unknown := finished("run-nope/fill/1", at)
 	h.event("liquid-handler-1", unknown)
 
