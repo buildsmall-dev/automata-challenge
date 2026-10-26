@@ -127,7 +127,7 @@ func (e *Executor) onEvent(m jetstream.Msg) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, _, err = e.applyToJob(ctx, ev.Device, ev.JobID, f)
+	_, changed, err := e.applyToJob(ctx, ev.Device, ev.JobID, f)
 	switch {
 	case errors.Is(err, ErrUnknownJob):
 		log.Printf("executor: %s event from %s for unknown job %s; dropping", ev.Kind, ev.Device, ev.JobID)
@@ -137,6 +137,9 @@ func (e *Executor) onEvent(m jetstream.Msg) {
 		m.NakWithDelay(retryDB)
 	default:
 		m.Ack()
+		if changed {
+			e.poke() // a step may have finished: the next may start, or the run end
+		}
 	}
 }
 
