@@ -17,3 +17,6 @@ that finds them. These get solved later, or written up in NOTES.md §5 if we don
 | K10 | `steps.lifecycle` is the Go `Step` as JSON with no version. Renaming a field silently drops it from rows already stored | Any later change to `Step` | Before changing `Step`'s fields: add a version or keep old names |
 | K11 | The store's guarantee depends on its callers: an event consumer must ack only after `applyToJob` returns nil, and a claim reply must reflect the returned Step | S5: acking early loses facts; replying from a stale read breaks claim/cancel | S5, as part of its check |
 | K12 | Each apply locks one row, so there are no deadlocks today. A later transaction that locks several steps, such as a run-wide cancel, must lock them in a fixed order | Run-level operations in S5 / cancel | Lock in `position` order |
+| K13 | Device ids go into subjects unchecked: a `.`, `*` or `>` in a device name from `workflows.yaml` breaks or widens subjects | A typo in workflows.yaml | Validate device names when workflows load |
+| K14 | No rolling-upgrade story: a v2 driver against a v1 executor has every message rejected (fails safe, not zero-downtime) | Deploys | Out of scope; NOTES.md |
+| K15 | An event's `device` should equal the device in its subject | A mis-wired driver reporting for another device | S5's consumer checks it |
