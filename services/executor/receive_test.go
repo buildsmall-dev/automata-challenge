@@ -11,6 +11,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/automata-tech/distributed-systems-interview/services/common/protocol"
+	"github.com/automata-tech/distributed-systems-interview/services/common/storage"
 )
 
 func testNATS(t *testing.T) *nats.Conn {
@@ -39,10 +40,15 @@ type harness struct {
 	e  *Executor
 }
 
-func newHarness(t *testing.T) *harness {
+// st is optional: only checks of plate data need storage.
+func newHarness(t *testing.T, st ...*storage.Storage) *harness {
 	db, nc := testDB(t), testNATS(t)
 	js, _ := jetstream.New(nc)
-	e := NewExecutor(db, nc, nil)
+	var store *storage.Storage
+	if len(st) > 0 {
+		store = st[0]
+	}
+	e := NewExecutor(db, nc, store)
 	if err := e.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
