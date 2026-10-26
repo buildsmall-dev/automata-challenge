@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"time"
 )
 
@@ -52,11 +53,16 @@ type Step struct {
 	FinishedAt      *time.Time
 	Outcome         Outcome // empty until the ledger says how it ended
 	InstrumentError string
-	LedgerSHA       string // what the instrument says it measured
-	StoredSHA       string // what we found in storage at StoredAt
-	StoredRef       string
-	StoredAt        time.Time // when storage was last checked
-	Conflict        string    // two different outcomes reported for the same job
+	LedgerSHA       string         // what the instrument says it measured
+	Checks          []StorageCheck // every time we read the data back from storage
+	DataLost        bool           // the driver no longer has the bytes to store
+	Conflict        string         // two different outcomes reported for the same job
+}
+
+type StorageCheck struct {
+	Ref string    // s3://bucket/key
+	SHA string    // sha256 of the object as read back
+	At  time.Time // when it was read back
 }
 
 type Fact interface{ fact() }
@@ -81,10 +87,12 @@ type Finished struct {
 }
 type DataStored struct {
 	JobID string
-	Ref   string    // s3://bucket/key
-	SHA   string    // sha256 of the object as read back from storage
-	At    time.Time // when it was read back
+	StorageCheck
 }
+
+// DataLost: the driver no longer holds the bytes of a read it never stored,
+// for example because it restarted between the read and the upload.
+type DataLost struct{ JobID string }
 
 func (Dispatched) fact() {}
 func (Claimed) fact()    {}
@@ -92,6 +100,7 @@ func (Cancel) fact()     {}
 func (Started) fact()    {}
 func (Finished) fact()   {}
 func (DataStored) fact() {}
+func (DataLost) fact()   {}
 
 // Apply returns the step with the fact merged in, and whether anything changed.
 func Apply(s Step, f Fact) (Step, bool) {
@@ -126,16 +135,32 @@ func Apply(s Step, f Fact) (Step, bool) {
 			s.Conflict = fmt.Sprintf("conflicting outcomes reported for %s: %s, then %s", f.JobID, s.Outcome, f.Outcome)
 		}
 	case DataStored:
-		// The newest check of storage wins, whatever order the checks arrive in.
-		if f.JobID == s.JobID && f.At.After(s.StoredAt) {
-			s.StoredSHA, s.StoredRef, s.StoredAt = f.SHA, f.Ref, f.At
+		if f.JobID == s.JobID && !slices.Contains(s.Checks, f.StorageCheck) {
+			s.Checks = append(s.Checks, f.StorageCheck)
+		}
+	case DataLost:
+		if f.JobID == s.JobID {
+			s.DataLost = true
 		}
 	}
 	return s, !reflect.DeepEqual(before, s)
 }
 
 func (s Step) hasEvidence() bool {
-	return s.StartedAt != nil || s.Outcome != "" || s.StoredSHA != ""
+	return s.StartedAt != nil || s.Outcome != "" || len(s.Checks) > 0 || s.DataLost
+}
+
+// verified: some read-back of storage matched what the instrument measured.
+// Once true it stays true, whatever order the checks arrive in.
+func (s Step) verified() bool {
+	return s.LedgerSHA != "" && slices.ContainsFunc(s.Checks, func(c StorageCheck) bool { return c.SHA == s.LedgerSHA })
+}
+
+func (s Step) latestCheck() (StorageCheck, bool) {
+	if len(s.Checks) == 0 {
+		return StorageCheck{}, false
+	}
+	return slices.MaxFunc(s.Checks, func(a, b StorageCheck) int { return a.At.Compare(b.At) }), true
 }
 
 // Phase is what the evidence supports, falling back to intent when there is none.
@@ -147,10 +172,13 @@ func (s Step) Phase() Phase {
 	case OutcomeFailed:
 		return PhaseFailed
 	case OutcomeCompleted:
-		if s.ProducesData && s.StoredSHA == "" {
-			return PhaseStoring
+		switch {
+		case !s.ProducesData, s.verified():
+			return PhaseCompleted
+		case s.DataLost:
+			return PhaseFailed
 		}
-		return PhaseCompleted
+		return PhaseStoring
 	}
 	switch {
 	case s.hasEvidence():
@@ -167,15 +195,36 @@ func (s Step) Phase() Phase {
 
 // Reason says why the evidence is not enough to resolve the step, or "" if it is.
 func (s Step) Reason() string {
+	read := s.Outcome == OutcomeCompleted && s.ProducesData
 	switch {
 	case s.Conflict != "":
 		return s.Conflict
 	case s.Outcome == OutcomeHung:
 		return "instrument hung; outcome unknown"
-	case s.Outcome == OutcomeCompleted && s.ProducesData && s.LedgerSHA == "":
+	case read && s.LedgerSHA == "":
 		return "instrument reported no digest for its data"
-	case s.Outcome == OutcomeCompleted && s.ProducesData && s.StoredSHA != "" && s.StoredSHA != s.LedgerSHA:
+	case read && len(s.Checks) > 0 && !s.verified() && !s.DataLost:
 		return "stored data does not match what the instrument measured"
+	}
+	return ""
+}
+
+func (s Step) failure() string {
+	if s.Outcome == OutcomeFailed {
+		return s.InstrumentError
+	}
+	msg := "instrument completed the read, but its data was lost before storage"
+	if len(s.Checks) > 0 {
+		msg += "; the stored object does not match what it measured"
+	}
+	return msg
+}
+
+// warning: a verified completion is never undone, but a later read-back that
+// no longer matches is reported.
+func (s Step) warning() string {
+	if c, ok := s.latestCheck(); ok && s.verified() && c.SHA != s.LedgerSHA {
+		return fmt.Sprintf("stored data no longer matches what the instrument measured (checked %s)", c.At.Format(time.RFC3339))
 	}
 	return ""
 }
@@ -200,22 +249,28 @@ func (p Phase) SchedulerStatus() string {
 }
 
 func (s Step) APIError() *string {
+	var msg string
 	switch s.Phase() {
 	case PhaseUnresolved:
-		r := s.Reason()
-		return &r
+		msg = s.Reason()
 	case PhaseFailed:
-		e := s.InstrumentError
-		return &e
+		msg = s.failure()
+	case PhaseCompleted:
+		msg = s.warning()
 	}
-	return nil
+	if msg == "" {
+		return nil
+	}
+	return &msg
 }
 
-// APIDataRef is set only once the stored data is verified against the ledger.
+// APIDataRef is set once the stored data has been verified against the ledger,
+// and stays set: a later mismatch is reported in the error, not by hiding where
+// the data is.
 func (s Step) APIDataRef() *string {
 	if !s.ProducesData || s.Phase() != PhaseCompleted {
 		return nil
 	}
-	ref := s.StoredRef
-	return &ref
+	c, _ := s.latestCheck()
+	return &c.Ref
 }

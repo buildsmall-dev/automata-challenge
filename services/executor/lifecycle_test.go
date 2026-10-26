@@ -28,8 +28,10 @@ func ran(outcome Outcome, sha string) Finished {
 }
 
 func stored(sha string, at time.Time) DataStored {
-	return DataStored{JobID: job, Ref: "s3://lab-data/runs/run-1/read_plate/" + job + ".csv", SHA: sha, At: at}
+	return DataStored{JobID: job, StorageCheck: StorageCheck{Ref: "s3://lab-data/runs/" + job + ".csv", SHA: sha, At: at}}
 }
+
+var lost = DataLost{JobID: job}
 
 var (
 	dispatched = Dispatched{JobID: job, Attempt: 1}
@@ -67,8 +69,21 @@ func TestStepLifecycle(t *testing.T) {
 			[]Fact{dispatched, claimed, ran(OutcomeCompleted, "X"), stored("Y", t2)}, PhaseUnresolved, "does not match", false},
 		{"a newer matching check resolves a mismatch", reader,
 			[]Fact{dispatched, claimed, ran(OutcomeCompleted, "X"), stored("Y", t2), stored("X", t3)}, PhaseCompleted, "", true},
-		{"an older check arriving late does not override a newer one", reader,
-			[]Fact{dispatched, claimed, ran(OutcomeCompleted, "X"), stored("Y", t3), stored("X", t2)}, PhaseUnresolved, "does not match", false},
+		{"corruption found after verification keeps completed and data_ref", reader,
+			[]Fact{dispatched, claimed, ran(OutcomeCompleted, "X"), stored("X", t2), stored("Y", t3)}, PhaseCompleted, "", true},
+		{"the same checks arriving in reverse order give the same record", reader,
+			[]Fact{dispatched, claimed, ran(OutcomeCompleted, "X"), stored("Y", t3), stored("X", t2)}, PhaseCompleted, "", true},
+
+		{"data lost before storage fails the read", reader,
+			[]Fact{dispatched, claimed, ran(OutcomeCompleted, "X"), lost}, PhaseFailed, "", false},
+		{"data lost before finished arrives fails it once finished arrives", reader,
+			[]Fact{dispatched, claimed, started, lost, ran(OutcomeCompleted, "X")}, PhaseFailed, "", false},
+		{"data lost, but storage has a matching copy: completed", reader,
+			[]Fact{dispatched, claimed, ran(OutcomeCompleted, "X"), lost, stored("X", t2)}, PhaseCompleted, "", true},
+		{"data lost and the stored copy does not match: failed", reader,
+			[]Fact{dispatched, claimed, ran(OutcomeCompleted, "X"), stored("Y", t2), lost}, PhaseFailed, "", false},
+		{"data lost for another job is ignored", reader,
+			[]Fact{dispatched, claimed, ran(OutcomeCompleted, "X"), DataLost{JobID: "run-1/read_plate/0"}}, PhaseStoring, "", false},
 		{"a completed read with no ledger digest is unresolved", reader,
 			[]Fact{dispatched, claimed, ran(OutcomeCompleted, "")}, PhaseUnresolved, "digest", false},
 
@@ -111,6 +126,37 @@ func TestStepLifecycle(t *testing.T) {
 	}
 }
 
+// A verified completion is never undone: later read-backs can only add a warning.
+func TestVerifiedCompletionStaysCompleted(t *testing.T) {
+	s := applyAll(reader, dispatched, claimed, ran(OutcomeCompleted, "X"), stored("X", t2))
+	for _, f := range []Fact{stored("Y", t3), lost, Cancel{}, stored("Z", t3.Add(time.Second))} {
+		s, _ = Apply(s, f)
+		if s.Phase() != PhaseCompleted || s.Phase().APIStatus() != StepCompleted {
+			t.Fatalf("after %T the step is %s; a verified completion must stay completed", f, s.Phase())
+		}
+	}
+	if e := s.APIError(); e == nil || !strings.Contains(*e, "no longer matches") {
+		t.Errorf("a later mismatch must be reported in error, got %v", e)
+	}
+	if s.APIDataRef() == nil {
+		t.Error("data_ref must stay set so the stored object can still be found")
+	}
+	healed, _ := Apply(s, stored("X", t3.Add(2*time.Second)))
+	if e := healed.APIError(); e != nil {
+		t.Errorf("a newer matching read-back clears the warning, got %q", *e)
+	}
+}
+
+func TestDataLostIsExplained(t *testing.T) {
+	s := applyAll(reader, dispatched, claimed, ran(OutcomeCompleted, "X"), lost)
+	if e := s.APIError(); e == nil || !strings.Contains(*e, "lost before storage") {
+		t.Errorf("failed read must say its data was lost, got %v", e)
+	}
+	if s.Outcome != OutcomeCompleted {
+		t.Errorf("the instrument's completed outcome must be kept, got %q", s.Outcome)
+	}
+}
+
 func TestTimesComeFromTheLedger(t *testing.T) {
 	s := applyAll(Step{}, dispatched, claimed, ran(OutcomeCompleted, ""))
 	if s.StartedAt == nil || !s.StartedAt.Equal(t0) || s.FinishedAt == nil || !s.FinishedAt.Equal(t1) {
@@ -119,7 +165,7 @@ func TestTimesComeFromTheLedger(t *testing.T) {
 }
 
 func TestDuplicateFactsChangeNothing(t *testing.T) {
-	facts := []Fact{dispatched, claimed, started, ran(OutcomeCompleted, "X"), stored("X", t2), Cancel{}}
+	facts := []Fact{dispatched, claimed, started, ran(OutcomeCompleted, "X"), stored("X", t2), lost, Cancel{}}
 	s := reader
 	for _, f := range facts {
 		s, _ = Apply(s, f)
@@ -143,6 +189,24 @@ func TestEvidenceOrderDoesNotMatter(t *testing.T) {
 			t.Errorf("order %v ended as %+v, want %+v", typeNames(order), got, want)
 		}
 	})
+
+	// Same for the mixed cases: data lost with or without a matching copy, and a
+	// mismatch found after verification.
+	for _, c := range []struct {
+		name  string
+		facts []Fact
+		phase Phase
+	}{
+		{"lost, no copy", []Fact{claimed, ran(OutcomeCompleted, "X"), lost}, PhaseFailed},
+		{"lost, matching copy", []Fact{claimed, ran(OutcomeCompleted, "X"), lost, stored("X", t2)}, PhaseCompleted},
+		{"verified then corrupted", []Fact{claimed, ran(OutcomeCompleted, "X"), stored("X", t2), stored("Y", t3)}, PhaseCompleted},
+	} {
+		permute(c.facts, func(order []Fact) {
+			if got := applyAll(reader, append([]Fact{dispatched}, order...)...).Phase(); got != c.phase {
+				t.Errorf("%s: order %v ended %s, want %s", c.name, typeNames(order), got, c.phase)
+			}
+		})
+	}
 }
 
 func TestAPIView(t *testing.T) {

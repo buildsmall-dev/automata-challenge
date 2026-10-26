@@ -73,3 +73,21 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
   "declare lost" deferred); dedupe window 2 min; single NATS server and single executor.
   Explainer: `tmp/d1-messaging-v2.html`.
 - **Slice / PR:** this PR records it; implementation slices follow.
+
+## D2. A verified completion is never undone; later storage problems are reported
+
+- **Question:** a read is completed once a read-back of storage matches the ledger's sha256.
+  If a later read-back does not match, should the step go back to unresolved?
+- **Chosen:** no. "Completed, data verified at T" stays true forever, so the status stays
+  `completed` and `data_ref` stays set. The newest mismatching read-back is reported in
+  `error` ("stored data no longer matches what the instrument measured (checked T)") and
+  cleared by a newer matching one. Before verification, a mismatch leaves the step
+  unresolved; with `DataLost` (the driver no longer has the bytes) it is failed.
+- **Alternatives:** move the step back to unresolved (API running): the record stays true
+  but a status regresses, and dependents may already have run. Ignore checks after
+  completion: hides corruption.
+- **Rests on:** evidence is a set of read-backs, so "some check matched" does not depend on
+  arrival order (tested over all orderings).
+- **Would revisit if:** we need data integrity as its own field (GraphQL could expose it
+  instead of overloading `error`).
+- **Slice / PR:** S1, step lifecycle.
