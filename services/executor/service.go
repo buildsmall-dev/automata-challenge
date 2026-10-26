@@ -62,8 +62,9 @@ func (e *Executor) Start(ctx context.Context) error {
 	}
 	loop, stop := context.WithCancel(context.Background())
 	e.stop = stop
-	e.wg.Add(1)
+	e.wg.Add(2)
 	go e.dispatchLoop(loop)
+	go e.recheckLoop(loop)
 	log.Printf("executor: listening for claims and events, dispatching runs")
 	return nil
 }

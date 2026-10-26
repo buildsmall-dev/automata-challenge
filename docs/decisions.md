@@ -29,29 +29,51 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
   true when messages are lost, duplicated or late, and processes or networks drop. Judged
   on production reliability, scalability, maintainability and operational cost.
 - **Chosen:** option C, the hybrid. Rule: durable facts, short-lived intentions, Postgres decides.
+  Wire contract in `services/common/protocol`.
   - **Commands:** core request `lab.<device>.cmd.run {v, job_id, run_id, step, attempt}` →
-    `accepted | busy | known`. The queue lives in Postgres; the executor sends only to a
-    device it believes free. A timeout means *unknown*: resend the same `job_id`, never a new
-    attempt, don't treat the device as free.
-  - **Claim before run:** before `inst.Run` the driver requests `lab.executor.claim {job_id}`.
-    One conditional update (`phase dispatched → claimed`, run not cancelled) on the same row
-    `CancelRun` changes, so exactly one of claim and cancel wins. `go` runs; `abort` or a
-    timeout does not run (retry the claim, it is idempotent). Replaces command expiry.
-  - **Events:** driver publishes `accepted / started / measured / finished` to JetStream stream
-    `LAB_EVENTS` (`lab.<device>.evt.*`), `Nats-Msg-Id` = job_id + kind, retried until PubAck.
-    Executor: durable pull consumer, idempotent guarded apply, ack after DB commit. The
-    executor provisions the stream at startup.
-  - **Reconcile:** `lab.<device>.job` request/reply answered from ledger + storage, used on
-    executor startup and for in-flight steps past their deadline (R2). Drivers replay recent
-    ledger outcomes as events on startup (R1).
+    `accepted | busy | known`. The queue lives in Postgres; the executor dispatches what
+    `NextSteps` says is ready in each run (a dispatched step occupies its device) and sends
+    the command until the step is claimed: again after 500ms on busy or no answer, after 3s
+    on accepted or known. A timeout means *unknown*: resend the same `job_id`, never a new
+    attempt, don't treat the device as free. Runs sharing a device are not queued against
+    each other; they retry on `busy` (K29).
+  - **Claim before run:** before `inst.Run` the driver requests `lab.executor.claim {job_id,
+    device}`. The executor applies a `Claimed` fact under the step's row lock, the same lock
+    a cancel takes, so exactly one of claim and cancel wins. Only a claim from the step's
+    assigned device counts. `go` runs; `abort` does not; no answer (the executor does not
+    reply when the database fails) does not run and the driver asks again (claims are
+    idempotent). Replaces command expiry.
+  - **Events:** the driver publishes `started / finished / stored / data_lost` to JetStream
+    stream `LAB_EVENTS` (`lab.<device>.evt.<kind>`), `Nats-Msg-Id` = `job_id:kind`, retried
+    until PubAck. Times and outcomes come from the ledger. The executor provisions the
+    stream at startup and reads it with a durable pull consumer: decode and validate (Term
+    if malformed, or if its device is not the one in its subject), apply idempotently under
+    the row lock, ack only after the commit; an event from a device the step is not
+    assigned to, or for a job no step has, is acked and logged; a database error is Nak'd.
+  - **Plate data:** the driver uploads a completed read's bytes to `runs/<job_id>.csv`
+    (`runs/<run>/<step>/<attempt>.csv`), retrying until storage takes them and holding the
+    device meanwhile, then publishes `stored` with the ref. The executor does not take the
+    ref on trust: it reads the object at the key it derives itself and hashes it.
+  - **Replay (R1):** on start the driver reports, from its ledger as it was before it
+    listened for commands, how every job ended (`started`, `finished`; a job cut off by
+    the restart is `hung`), then for each completed read asks storage: present → `stored`;
+    absent after an upload grace (2 × the storage timeout) → `data_lost`; no answer → ask
+    again.
+  - **Reconcile (R2, not built):** `lab.<device>.job` request/reply answered from ledger and
+    storage, for executor startup and steps claimed but never started (K19, K25). Planned
+    as S7.
   - **Truth rules:** unknown stays unknown (a claimed step whose driver is unreachable stays
-    `running` with "outcome unknown", never failed on a timer). Late facts always win, even
-    after a cancel. A read is `completed` only when the ledger's sha256 equals the hash of the
-    object at `runs/<run>/<step>/<job_id>.csv`, checked by the executor. Data lost before
-    storage is a failed attempt, retried.
-  - **Internal phases:** `dispatched` (API pending) → `claimed / running / storing / unknown`
-    (API running) → `completed | failed | cancelled`. A dispatched step occupies its device.
-  - Set NATS `PingInterval` explicitly to a few seconds.
+    `running`, never failed on a timer). Late facts always win, even after a cancel. A read
+    is `completed` only when the ledger's sha256 equals the hash of the object at its key,
+    read back by the executor; once verified it stays completed (D2). A read reported lost
+    is **unresolved**, not failed, and its run stays open: an earlier upload may still land,
+    and the executor looks for it every 10s (D3). Ending it is a decision (retry policy or
+    operator), not a timeout.
+  - **Internal phases:** `pending`, `dispatched` (API pending) → `claimed / running /
+    storing / unresolved` (API running; `unresolved` carries its reason in `error`) →
+    `completed | failed | cancelled`. A run finishes only when no step is in flight:
+    completed if all completed, failed if one failed, `finished_at` the last ledger time.
+  - NATS `PingInterval` 5s, `MaxPingsOutstanding` 2, in the executor and the drivers.
 - **Alternatives:**
   - *A, request/reply + executor polling:* simplest, and recovery is the main path, but facts
     live only in driver memory and the ledger while the executor is down, and it assumes we
@@ -68,11 +90,31 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
 - **Would revisit if:** many runs must queue per device with the queue as source of truth
   (B with a claim); the extra claim round trip proves too slow; we need executor replicas
   (per-run locking).
-- **Known limits:** plate data lost in the crash window before upload costs a re-read (a
-  second ledger execution); a driver that never returns leaves a step unknown (operator
-  "declare lost" deferred); dedupe window 2 min; single NATS server and single executor.
-  Explainer: `tmp/d1-messaging-v2.html`.
-- **Slice / PR:** this PR records it; implementation slices follow.
+- **Known limits:** a read whose data is really gone stays unresolved, and its run open,
+  until a retry policy or an operator ends it (D3, K39; no automatic re-read yet); a driver
+  that never returns leaves a step unknown (operator "declare lost" deferred, K6); dedupe
+  window 2 min, after which repeats rely on idempotent apply; replay covers the whole
+  ledger on every start (K35); single NATS server and single executor.
+  Explainer: `tmp/d1-messaging-v2.html` (as recorded; not updated for the changes below).
+- **Slice / PR:** recorded in #3. Built in S1 #4 (lifecycle), S2 #5 (store), S3 #6
+  (contract), S4 #7 (driver), S5a #8 (executor receives), S5b #9 (executor sends),
+  S6 #10 (plate data), R1 #11 (replay).
+- **Changes since recorded** (2026-10-26, to match the implementation):
+  - Event kinds were `accepted / started / measured / finished`; now `started / finished /
+    stored / data_lost` (S3, S6). `accepted` is the command reply; nothing is "measured"
+    separately from `finished`.
+  - Data key was `runs/<run>/<step>/<job_id>.csv`; now `runs/<job_id>.csv` (S3 `DataKey`),
+    the same path without repeating run and step.
+  - "Data lost before storage is a failed attempt, retried" → unresolved until storage shows
+    the data or someone decides (D3). Nothing retries automatically yet.
+  - Phase `unknown` is called `unresolved`, with a reason (S1).
+  - The claim was "a conditional update `dispatched → claimed`"; it is the `Claimed` fact
+    applied under the row lock (S2), accepted only from the step's assigned device, with no
+    reply on a database error (S5a, Codex).
+  - R1 replays the whole ledger as it was before listening, not "recent" outcomes, and
+    checks storage for each completed read (R1).
+  - Events whose device does not match their subject, or the step's assigned device, are
+    dropped (S5a, K15).
 
 ## D2. A verified completion is never undone; later storage problems are reported
 
@@ -82,7 +124,8 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
   `completed` and `data_ref` stays set. The newest mismatching read-back is reported in
   `error` ("stored data no longer matches what the instrument measured (checked T)") and
   cleared by a newer matching one. Before verification, a mismatch leaves the step
-  unresolved; with `DataLost` (the driver no longer has the bytes) it is failed.
+  unresolved; with `DataLost` (the driver no longer has the bytes) it was failed, until
+  D3 changed that to unresolved.
 - **Alternatives:** move the step back to unresolved (API running): the record stays true
   but a status regresses, and dependents may already have run. Ignore checks after
   completion: hides corruption.
@@ -91,3 +134,28 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
 - **Would revisit if:** we need data integrity as its own field (GraphQL could expose it
   instead of overloading `error`).
 - **Slice / PR:** S1, step lifecycle.
+
+## D3. A read reported lost stays unresolved; only storage, or a decision, settles it
+
+- **Question:** a restarted driver reports `data_lost` when storage has no object for a
+  read its ledger completed. Is that enough to fail the read, and finish the run as failed?
+- **Chosen:** no. `DataLost` makes the read **unresolved** (API `running`, `error` says the
+  data was lost but an earlier upload may still appear), so its run is never finished while
+  the outcome is open. The executor looks in storage for each such read every 10s
+  (`recheckLoop`); a matching object completes it (late facts win), as if `stored` had
+  arrived. Ending it any other way is an explicit decision, not a timeout: re-run the read
+  (hang/retry `/decide`) or an operator declares it lost (K6).
+- **Alternatives:** fail after a grace period (R1 first did this, with 2 x the storage
+  timeout): a delayed upload can still land later, and then the record contradicts
+  storage (user review of R1). Let storage arbitrate with create-only writes
+  (`If-None-Match: *`), tombstone the key before declaring loss: would make "lost" a fact,
+  but **measured**: SeaweedFS 3.62 ignores the header (a second conditional PUT returned
+  200 and overwrote). Fence late uploads with a per-process key: the data would still be in
+  storage, so "lost" would still be false.
+- **Rests on:** no bound on when a dead client's upload can land (**inferred**: nothing in
+  S3 or SeaweedFS promises one). The driver keeps its grace period only to avoid a needless
+  `data_lost`, not for correctness.
+- **Would revisit if:** storage supports conditional writes (newer SeaweedFS, real S3:
+  then tombstone-and-arbitrate, and lost becomes final); or runs must end on their own
+  (then a retry policy ends them, not a guess).
+- **Slice / PR:** R1 (PR #11), after review.
