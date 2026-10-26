@@ -18,10 +18,12 @@ func (e *Executor) applyToStep(ctx context.Context, runID, name string, f Fact) 
 	return e.apply(ctx, `run_id = $1 AND name = $2`, []any{runID, name}, f)
 }
 
-// applyToJob applies a fact to the step whose current attempt is jobID. For
-// everything a driver tells us (claims and evidence).
-func (e *Executor) applyToJob(ctx context.Context, jobID string, f Fact) (Step, bool, error) {
-	return e.apply(ctx, `job_id = $1`, []any{jobID}, f)
+// applyToJob applies a fact to the step whose current attempt is jobID, if
+// that step is assigned to device. For everything a driver tells us (claims and
+// evidence): only the assigned instrument's ledger is evidence for a step, so a
+// report from any other device is treated as about an unknown job.
+func (e *Executor) applyToJob(ctx context.Context, device, jobID string, f Fact) (Step, bool, error) {
+	return e.apply(ctx, `job_id = $1 AND device_id = $2`, []any{jobID, device}, f)
 }
 
 // apply is load, Apply, save in one transaction. FOR UPDATE makes a second
