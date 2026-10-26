@@ -159,3 +159,61 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
   then tombstone-and-arbitrate, and lost becomes final); or runs must end on their own
   (then a retry policy ends them, not a guess).
 - **Slice / PR:** R1 (PR #11), after review.
+
+## D4. Retry per cause and per device, bounded; a step is decided by all its attempts
+
+- **Question:** what ends a step that cannot succeed as it stands (a retryable failure, a hang,
+  a read whose data was lost), and when to start a new attempt. Today a hung or lost step stays
+  `running` forever, and a retryable failure fails the run. A careless retry can repeat liquid
+  handling physically.
+- **Chosen:** option B, automatic and bounded, with a trigger per cause:
+  - **Retryable failure:** a new attempt at once. The driver forwards the instrument's
+    `Retryable` in `finished` (it is not in the ledger).
+  - **Hung:** a new attempt after `finished(hung)`, only on a `repeat_safe` device. Otherwise
+    the step is `failed`: "instrument hung; outcome unknown; not repeated". There is no timer:
+    the retry waits for the instrument's own report that it gave up, so it never goes to a
+    frozen instrument.
+  - **Data lost:** a re-read at once, alongside the still-open attempt (D3), on a device with
+    `reread_on_data_loss`. Don't wait for the late upload; D3 found no limit on that wait.
+  - At most 3 attempts per step. Each new attempt goes through dispatch and claim, so a cancel
+    still wins.
+  - **A step is decided by all its attempts:** `completed` once any attempt is verified
+    complete (the first verified one supplies `data_ref` and the times, D2); `failed` only when
+    every attempt is finished, none completed, and no further attempt will be made; otherwise
+    `running`. An attempt that is still open does not hold its run back once another attempt
+    of the same step has completed.
+  - Every attempt is kept (fixes K2). Facts for older attempts find their step by parsing the
+    job id (`run/step/attempt`). REST shows the attempt that decided the step, or the latest
+    if none has; GraphQL shows the history.
+  - **Defaults:** repeat-safe = plate reader, incubator; re-read on data loss = plate reader;
+    3 attempts in total.
+- **Alternatives:**
+  - *A, an operator decides (GraphQL `retryStep` / `abandonStep`):* never repeats anything by
+    itself, but under any fault seed runs never end on their own (measured, below).
+  - *C, the instrument's `Retryable` flag only:* a hang returns no flag, so C can't decide the
+    hardest case. It becomes A for hangs, or an unsafe B (repeated dispensing).
+  - *First draft of B (explainer v1):* one trigger for all three causes, and "a step is its
+    latest attempt". Wrong for lost data: the first attempt is still open, so a failing re-read
+    would have marked the step `failed` while its upload could still land (user review).
+  - *A final hang left `running` until an operator acts:* `running` claims something is still
+    happening after the instrument has stopped. CLAUDE.md: `failed` with the reason once we
+    can't find out.
+- **Rests on:**
+  - **measured:** the fault roll is `sha256(seed:device:step:attempt)`, with no run id, so
+    under one seed a step's first attempt has the same fate in every run; only a retry rolls
+    again (`incubate` hangs on attempts 1 and 2 at 30%, seed 0).
+  - **inferred:** after the ledger says `hung`, nothing more is learned
+    (`instrument.go:192-199`).
+  - **inferred:** `FAILURES_RETRYABLE` is false for the liquid handler, true for the others.
+  - **guess:** which operations are safe to repeat on real equipment, and whether a later
+    re-read is an acceptable substitute. Hence both are settings per device, not code.
+- **Would revisit if:** repeat-safety can't be stated honestly per device (then A); acceptance
+  check 5 must hold with faults on (then A); storage gains conditional writes (a lost read
+  becomes final under D3, and is retried like a hang).
+- **Known limits:** a step whose re-reads all fail after a data loss stays `running` (K39,
+  narrower); a retry fails acceptance check 5 under faults (K5); a re-read is a different
+  measurement, taken later.
+  Explainers: `tmp/d4-hang-retry.html` (v1), `tmp/d4-hang-retry-v2.html`.
+- **Slice / PR:** this PR records it. Slices follow: protocol (`retryable`), lifecycle
+  (attempts, the all-attempts rule), store (lookup by job id), policy (config, retries), then
+  a `/break` run with hang faults.
