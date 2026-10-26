@@ -34,11 +34,8 @@ and say so before starting.
 6. **Self-review** against the checklist in `CLAUDE.md`. Write down each
    "what could go wrong" you find, even ones you won't fix in this slice.
 
-7. **Codex review, once.** Commit, then run:
-   ```bash
-   codex review --base dev "Focus on correctness under duplicate, late, or lost NATS messages, process restarts, and whether the run record can disagree with the instrument ledger. Ignore style."
-   ```
-   Triage each finding: fix it, defer it, or reject it with a reason. Do not apply
+7. **Codex review, once.** Commit, then run `./scripts/codex-review.sh` (read-only,
+   diffs against `dev`, prints only Codex's verdict; takes about a minute). Triage each finding: fix it, defer it, or reject it with a reason. Do not apply
    fixes silently.
 
 8. **Explain it to the user.** This is the review conversation, so write it to teach:

@@ -4,10 +4,25 @@ The challenge is in `README.md`. This file is how we work on it.
 
 ## The invariant
 
-**The run record must be true.** What the API reports for a run and its steps,
-and the data in object storage, must match what physically happened. The
-instruments' ledgers (`curl -s localhost:710{1,2,3}/status`) are the ground
-truth. "The API says completed" is a claim, not evidence.
+**The run record must be true.** Every claim it makes needs its own evidence:
+
+- **Physical claims** (a step ran, how it ended, when): the instrument's ledger
+  (`curl -s localhost:710{1,2,3}/status`).
+- **Data claims** (`data_ref`): an object in storage whose sha256 equals the
+  ledger's `data_sha256`. The instrument hands over the bytes only in memory, so a
+  read is **completed only once its data is stored**. Ledger `completed` alone is
+  not enough.
+- **No evidence means no claim.** Ledger `hung`, a driver we can't reach, or a
+  missing object means the outcome is unknown. The record must not say
+  `completed`. It says `running` while we can still find out, and `failed` with
+  the reason once we can't.
+- **Intent is ours.** The ledger knows nothing about pending, cancelled or
+  retryable. Those come from the executor's own state, and must never contradict
+  the ledger.
+
+The ledger is the best evidence, not infallible: if its end-of-job write fails
+(`instrument.go:241`), a restart reports that job as `hung`. "The API says
+completed" is a claim, not evidence.
 
 ## Fixed, do not change
 
@@ -38,8 +53,9 @@ Git:
 - Each slice gets a branch `slice/<short-name>` off `dev` and a PR into `dev`.
   One reviewable idea per PR. At the end, one PR `dev` → `main`.
 - Commit messages say why, not only what.
-- Before the PR is opened: run `codex review --base dev` once, then bring Claude's
-  own findings and Codex's to the user. Don't apply Codex fixes without asking.
+- Before the PR is opened: run `./scripts/codex-review.sh` once (read-only Codex,
+  diff against `dev`), then bring Claude's own findings and Codex's to the user.
+  Don't apply Codex fixes without asking.
 
 ## Review checklist (every change that touches messaging or state)
 
@@ -49,7 +65,8 @@ For each message or state transition, answer:
 3. Who **acknowledges** it, and is the ack after the effect is durable?
 4. Can a status move **backwards** or skip a state? Is the update guarded?
 5. Where does each **timestamp** come from? (Prefer the instrument's ledger.)
-6. Could the record say something the ledger contradicts?
+6. Could the record claim something the ledger or the stored data contradicts,
+   or claim success without evidence (data not yet stored, outcome unknown)?
 
 ## Commands
 

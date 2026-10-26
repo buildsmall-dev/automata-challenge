@@ -28,8 +28,10 @@ An experiment, not poking around. The prediction comes before the run.
      match the ledger's `data_sha256`?
    - relevant `docker compose logs`, kept short.
 
-4. **Compare.** For each step, does the record agree with the ledger (status, number
-   of executions, times, data)? Is anything stuck? Was the prediction right? A wrong
+4. **Compare** against the invariant in `CLAUDE.md`. For each step, does the record
+   agree with the ledger (status, number of executions, times)? Is every
+   `completed` read backed by a stored object with the right hash? Does any step
+   claim success where the evidence says `hung` or is missing? Is anything stuck? Was the prediction right? A wrong
    prediction is a finding about our understanding, so say what we misunderstood.
 
 5. **Log it** in `docs/chaos-log.md` with the template there.
