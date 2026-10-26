@@ -32,13 +32,14 @@ const (
 // A run command is answered at once (accepted, busy or known). An accepted job
 // is claimed with the executor before anything physical happens; only "go"
 // runs it. How it went is read from the instrument's ledger, not from Run's
-// return, so a hung job, which never returns, is still reported.
+// return, so a hung job, which never returns, is still reported. A completed
+// read's bytes exist only in Run's return: they are stored, then reported.
 func Serve(ctx context.Context, inst *instrument.Instrument, nc *nats.Conn, st *storage.Storage) error {
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return err
 	}
-	d := &driver{inst: inst, nc: nc, js: js, device: inst.DeviceID()}
+	d := &driver{inst: inst, nc: nc, js: js, st: st, device: inst.DeviceID()}
 	sub, err := nc.Subscribe(protocol.RunSubject(d.device), func(m *nats.Msg) { d.onRun(ctx, m) })
 	if err != nil {
 		return err
@@ -53,6 +54,7 @@ type driver struct {
 	inst   *instrument.Instrument
 	nc     *nats.Conn
 	js     jetstream.JetStream
+	st     *storage.Storage
 	device string
 
 	mu      sync.Mutex
@@ -96,13 +98,13 @@ func (d *driver) execute(ctx context.Context, cmd protocol.RunCommand) {
 	if !d.claim(ctx, cmd.JobID) {
 		return
 	}
-	ran := make(chan error, 1)
+	r := &run{done: make(chan struct{})}
 	go func() {
-		_, err := d.inst.Run(ctx, instrument.Job{JobID: cmd.JobID, RunID: cmd.RunID, StepName: cmd.Step})
-		ran <- err
+		defer close(r.done)
+		r.out, r.err = d.inst.Run(ctx, instrument.Job{JobID: cmd.JobID, RunID: cmd.RunID, StepName: cmd.Step})
 	}()
 
-	started, ok := d.waitLedger(ctx, cmd.JobID, ran, func(instrument.Execution) bool { return true })
+	started, ok := d.waitLedger(ctx, cmd.JobID, r, func(instrument.Execution) bool { return true })
 	if !ok {
 		return
 	}
@@ -118,6 +120,41 @@ func (d *driver) execute(ctx context.Context, cmd protocol.RunCommand) {
 		ev.SHA = *done.DataSHA256
 	}
 	d.publish(ctx, ev)
+
+	if done.Outcome == instrument.OutcomeCompleted && d.inst.ProducesData() {
+		select {
+		case <-r.done: // Run returns just after the ledger records the end
+			d.store(ctx, cmd.JobID, r.out.Data)
+		case <-ctx.Done():
+		}
+	}
+}
+
+// run is one call of the instrument's Run; done closes when it returns.
+type run struct {
+	done chan struct{}
+	out  instrument.Outcome
+	err  error
+}
+
+// store uploads a read's bytes until storage takes them, then reports stored.
+// Until then this job is still the driver's current one, so the device takes no
+// other job: the only copy of the data is in memory. The key is derived from
+// the job, so a retried upload overwrites rather than adds.
+func (d *driver) store(ctx context.Context, jobID string, data []byte) {
+	if d.st == nil {
+		log.Printf("driver %s: no storage; data of %s is not stored", d.device, jobID)
+		return
+	}
+	for ctx.Err() == nil {
+		ref, err := d.st.Put(ctx, protocol.DataKey(jobID), data)
+		if err == nil {
+			d.publish(ctx, protocol.Event{Kind: protocol.KindStored, JobID: jobID, Ref: ref})
+			return
+		}
+		log.Printf("driver %s: store data of %s: %v; retrying", d.device, jobID, err)
+		sleep(ctx, retryEvery)
+	}
 }
 
 // claim asks the executor for permission to start. Only "go" is permission:
@@ -147,17 +184,22 @@ func (d *driver) claim(ctx context.Context, jobID string) bool {
 // waitLedger waits for the job's ledger entry to satisfy cond. If Run fails
 // before the entry appears, nothing ran (instrument.go: ErrBusy or a ledger
 // write error) and there is nothing to report.
-func (d *driver) waitLedger(ctx context.Context, jobID string, ran <-chan error, cond func(instrument.Execution) bool) (instrument.Execution, bool) {
+func (d *driver) waitLedger(ctx context.Context, jobID string, r *run, cond func(instrument.Execution) bool) (instrument.Execution, bool) {
+	var ran <-chan struct{}
+	if r != nil {
+		ran = r.done
+	}
 	for {
 		if e := ledgerEntry(d.inst.Status(), jobID); e != nil && cond(*e) {
 			return *e, true
 		}
 		select {
-		case err := <-ran:
-			if err != nil {
-				log.Printf("driver %s: %s did not start: %v", d.device, jobID, err)
+		case <-ran:
+			if r.err != nil {
+				log.Printf("driver %s: %s did not start: %v", d.device, jobID, r.err)
 				return instrument.Execution{}, false
 			}
+			ran = nil // returned normally: keep reading the ledger
 		case <-ctx.Done():
 			return instrument.Execution{}, false
 		case <-time.After(ledgerPoll):

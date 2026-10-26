@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"sync"
@@ -13,6 +16,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/automata-tech/distributed-systems-interview/services/common/protocol"
+	"github.com/automata-tech/distributed-systems-interview/services/common/storage"
 	"github.com/automata-tech/distributed-systems-interview/services/driver/instrument"
 )
 
@@ -26,7 +30,8 @@ type rig struct {
 	device string
 }
 
-func newRig(t *testing.T, cfg instrument.Config, withStream bool) *rig {
+// st is optional: only the plate reader needs storage.
+func newRig(t *testing.T, cfg instrument.Config, withStream bool, st ...*storage.Storage) *rig {
 	t.Helper()
 	srv, err := server.NewServer(&server.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir(), NoLog: true, NoSigs: true})
 	if err != nil {
@@ -62,7 +67,11 @@ func newRig(t *testing.T, cfg instrument.Config, withStream bool) *rig {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); Serve(ctx, inst, nc, nil) }()
+	var store *storage.Storage
+	if len(st) > 0 {
+		store = st[0]
+	}
+	go func() { defer close(done); Serve(ctx, inst, nc, store) }()
 	t.Cleanup(func() { cancel(); <-done })
 	return r
 }
@@ -314,5 +323,71 @@ func TestEventsAreRetriedUntilStored(t *testing.T) {
 	es := r.events(2, 4*time.Second)
 	if len(es) != 2 || es[0].Kind != protocol.KindStarted || es[1].Kind != protocol.KindFinished {
 		t.Fatalf("events = %v, want [started finished] once the stream exists", kinds(es))
+	}
+}
+
+// testStorage is the compose object store (docker compose up -d storage), in a
+// bucket of its own.
+func testStorage(t *testing.T) *storage.Storage {
+	t.Helper()
+	st, err := storage.New("http://localhost:8343", "lab-data-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureBucket(context.Background()); err != nil {
+		t.Skipf("storage not reachable (%v); run: docker compose up -d storage", err)
+	}
+	return st
+}
+
+func uniqueRun() string {
+	b := make([]byte, 4)
+	rand.Read(b)
+	return "run-" + hex.EncodeToString(b)
+}
+
+// A read is reported finished, then its bytes are stored under the job's key,
+// then stored is reported with the ref. The object is what the ledger measured.
+func TestPlateDataIsStoredThenReported(t *testing.T) {
+	st := testStorage(t)
+	r := newRig(t, instrument.Config{ProducesData: true}, true, st)
+	r.claimer(protocol.ClaimGo)
+	cmd := protocol.NewRunCommand(uniqueRun(), "read_plate", 1)
+	if got := r.send(cmd); got != protocol.RunAccepted {
+		t.Fatalf("reply = %s", got)
+	}
+	es := r.events(3, 5*time.Second)
+	if got := kinds(es); len(got) != 3 || got[1] != protocol.KindFinished || got[2] != protocol.KindStored {
+		t.Fatalf("events = %v, want [started finished stored]", got)
+	}
+	key := protocol.DataKey(cmd.JobID)
+	if es[2].Ref != st.Ref(key) || es[2].msgID != protocol.MsgID(cmd.JobID, protocol.KindStored) {
+		t.Errorf("stored = %+v (msg id %s), want ref %s", es[2].Event, es[2].msgID, st.Ref(key))
+	}
+	data, err := st.Get(context.Background(), key)
+	if err != nil {
+		t.Fatalf("object %s: %v", key, err)
+	}
+	sum := sha256.Sum256(data)
+	ex := r.executions(cmd.JobID)
+	if len(ex) != 1 || ex[0].DataSHA256 == nil || hex.EncodeToString(sum[:]) != *ex[0].DataSHA256 {
+		t.Errorf("stored object sha %x does not match the ledger %+v", sum, ex)
+	}
+}
+
+// Without working storage nothing claims the data is stored, and the device is
+// held: the one copy of the bytes is still in memory.
+func TestNoStoredEventWithoutStorage(t *testing.T) {
+	down, _ := storage.New("http://127.0.0.1:1", "lab-data-test")
+	r := newRig(t, instrument.Config{ProducesData: true}, true, down)
+	r.claimer(protocol.ClaimGo)
+	cmd := protocol.NewRunCommand(uniqueRun(), "read_plate", 1)
+	r.send(cmd)
+	es := r.events(3, 1500*time.Millisecond)
+	if got := kinds(es); len(got) != 2 || got[1] != protocol.KindFinished {
+		t.Fatalf("events = %v, want [started finished] and no stored", got)
+	}
+	if got := r.send(protocol.NewRunCommand(uniqueRun(), "read_plate", 1)); got != protocol.RunBusy {
+		t.Errorf("another job while the data is unstored = %s, want busy", got)
 	}
 }

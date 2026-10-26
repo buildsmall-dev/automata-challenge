@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,8 +25,8 @@ import (
 const (
 	consumerName = "executor"
 	ackWait      = 30 * time.Second
-	retryDB      = time.Second      // an event the database could not take
-	retryLater   = 30 * time.Second // an event this version does not handle yet
+	retryDB      = time.Second     // an event the database could not take
+	retryStorage = 2 * time.Second // stored, but the object could not be read yet
 )
 
 // listen provisions the stream and starts the claim handler and the event
@@ -119,14 +121,27 @@ func (e *Executor) onEvent(m jetstream.Msg) {
 		m.Term()
 		return
 	}
-	f, ok := eventFact(ev)
-	if !ok {
-		// stored is checked against storage, which comes with the plate data (S6).
-		m.NakWithDelay(retryLater)
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	f := eventFact(ev)
+	if ev.Kind == protocol.KindStored {
+		if e.storage == nil {
+			m.NakWithDelay(retryStorage)
+			return
+		}
+		if want := e.storage.Ref(protocol.DataKey(ev.JobID)); ev.Ref != want {
+			log.Printf("executor: dropping stored event for %s: ref %s, the data belongs at %s", ev.JobID, ev.Ref, want)
+			m.Term()
+			return
+		}
+		ds, err := e.readBack(ctx, ev.JobID)
+		if err != nil {
+			log.Printf("executor: check stored data of %s: %v; will retry", ev.JobID, err)
+			m.NakWithDelay(retryStorage)
+			return
+		}
+		f = ds
+	}
 	_, changed, err := e.applyToJob(ctx, ev.Device, ev.JobID, f)
 	switch {
 	case errors.Is(err, ErrUnknownJob):
@@ -159,15 +174,31 @@ func decodeEvent(subject string, data []byte) (protocol.Event, error) {
 	return ev, nil
 }
 
-func eventFact(ev protocol.Event) (Fact, bool) {
+// eventFact is the fact an event reports. stored has none of its own: the
+// driver's word is not evidence, the object read back is (readBack).
+func eventFact(ev protocol.Event) Fact {
 	switch ev.Kind {
 	case protocol.KindStarted:
-		return Started{JobID: ev.JobID, At: *ev.StartedAt}, true
+		return Started{JobID: ev.JobID, At: *ev.StartedAt}
 	case protocol.KindFinished:
 		return Finished{JobID: ev.JobID, Outcome: Outcome(ev.Outcome), StartedAt: *ev.StartedAt,
-			FinishedAt: *ev.FinishedAt, Error: ev.Error, SHA: ev.SHA}, true
+			FinishedAt: *ev.FinishedAt, Error: ev.Error, SHA: ev.SHA}
 	case protocol.KindDataLost:
-		return DataLost{JobID: ev.JobID}, true
+		return DataLost{JobID: ev.JobID}
 	}
-	return nil, false
+	return nil
+}
+
+// readBack reads the job's object from storage and records what it holds. The
+// lifecycle compares that hash with the ledger's; a missing or unreadable
+// object is an error, so the event is checked again later.
+func (e *Executor) readBack(ctx context.Context, jobID string) (DataStored, error) {
+	key := protocol.DataKey(jobID)
+	data, err := e.storage.Get(ctx, key)
+	if err != nil {
+		return DataStored{}, err
+	}
+	sum := sha256.Sum256(data)
+	return DataStored{JobID: jobID, StorageCheck: StorageCheck{
+		Ref: e.storage.Ref(key), SHA: hex.EncodeToString(sum[:]), At: time.Now().UTC()}}, nil
 }
