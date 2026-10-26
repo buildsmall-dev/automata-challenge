@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/lib/pq"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/automata-tech/distributed-systems-interview/services/common/storage"
 )
@@ -34,6 +36,10 @@ type Executor struct {
 	db      *sql.DB
 	nc      *nats.Conn
 	storage *storage.Storage
+
+	claimSub  *nats.Subscription
+	consuming jetstream.ConsumeContext
+	closeOnce sync.Once
 }
 
 func NewExecutor(db *sql.DB, nc *nats.Conn, st *storage.Storage) *Executor {
@@ -42,13 +48,15 @@ func NewExecutor(db *sql.DB, nc *nats.Conn, st *storage.Storage) *Executor {
 
 // Start is called once, when the executor process starts.
 func (e *Executor) Start(ctx context.Context) error {
-	// TODO
-	log.Printf("executor: started, but nothing talks to the drivers yet")
+	if err := e.listen(ctx); err != nil {
+		return err
+	}
+	log.Printf("executor: listening for claims and events")
 	return nil
 }
 
 // Close is called once, when the executor process stops.
-func (e *Executor) Close() {}
+func (e *Executor) Close() { e.closeOnce.Do(e.stopListening) }
 
 func (e *Executor) CreateRun(ctx context.Context, workflowName string, steps []StepTemplate) (RunView, error) {
 	runID := "run-" + randomHex(6)
