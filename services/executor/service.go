@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/lib/pq"
 	"github.com/nats-io/nats.go"
@@ -40,10 +41,18 @@ type Executor struct {
 	claimSub  *nats.Subscription
 	consuming jetstream.ConsumeContext
 	closeOnce sync.Once
+
+	stop      context.CancelFunc
+	wg        sync.WaitGroup // the dispatch loop and the commands it is sending
+	wake      chan struct{}
+	sendMu    sync.Mutex
+	sending   map[string]bool      // job -> a command is out now
+	notBefore map[string]time.Time // job -> when it may be sent again
 }
 
 func NewExecutor(db *sql.DB, nc *nats.Conn, st *storage.Storage) *Executor {
-	return &Executor{db: db, nc: nc, storage: st}
+	return &Executor{db: db, nc: nc, storage: st, wake: make(chan struct{}, 1),
+		sending: map[string]bool{}, notBefore: map[string]time.Time{}}
 }
 
 // Start is called once, when the executor process starts.
@@ -51,12 +60,25 @@ func (e *Executor) Start(ctx context.Context) error {
 	if err := e.listen(ctx); err != nil {
 		return err
 	}
-	log.Printf("executor: listening for claims and events")
+	loop, stop := context.WithCancel(context.Background())
+	e.stop = stop
+	e.wg.Add(1)
+	go e.dispatchLoop(loop)
+	log.Printf("executor: listening for claims and events, dispatching runs")
 	return nil
 }
 
-// Close is called once, when the executor process stops.
-func (e *Executor) Close() { e.closeOnce.Do(e.stopListening) }
+// Close is called once, when the executor process stops. Sending stops first,
+// so nothing new is dispatched while the last events are still being applied.
+func (e *Executor) Close() {
+	e.closeOnce.Do(func() {
+		if e.stop != nil {
+			e.stop()
+			e.wg.Wait()
+		}
+		e.stopListening()
+	})
+}
 
 func (e *Executor) CreateRun(ctx context.Context, workflowName string, steps []StepTemplate) (RunView, error) {
 	runID := "run-" + randomHex(6)
@@ -95,8 +117,7 @@ func (e *Executor) StartRun(ctx context.Context, runID string) (RunView, error) 
 		RunRunning, runID, RunPending); err != nil {
 		return RunView{}, fmt.Errorf("start run %s: %w", runID, err)
 	}
-	// TODO: get the run going.
-	log.Printf("executor: run %s started, but nothing happens yet", runID)
+	e.poke()
 	return e.GetRun(ctx, runID)
 }
 

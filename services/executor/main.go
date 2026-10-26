@@ -51,7 +51,9 @@ func main() {
 		log.Fatalf("ping database: %v", err)
 	}
 
-	nc, err := nats.Connect(natsURL, nats.MaxReconnects(-1), nats.ReconnectWait(time.Second))
+	nc, err := nats.Connect(natsURL, nats.MaxReconnects(-1), nats.ReconnectWait(time.Second),
+		// The default (2 min x 2) let a 20s partition go unnoticed (chaos-log C1).
+		nats.PingInterval(5*time.Second), nats.MaxPingsOutstanding(2))
 	if err != nil {
 		log.Fatalf("connect nats %s: %v", natsURL, err)
 	}
