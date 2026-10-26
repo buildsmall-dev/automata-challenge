@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -64,9 +65,13 @@ func (e *Executor) CreateRun(ctx context.Context, workflowName string, steps []S
 	for position, st := range steps {
 		// A nil slice would be stored as NULL, not as an empty array.
 		deps := append([]string{}, st.DependsOn...)
+		lifecycle, err := json.Marshal(Step{ProducesData: producesData(st.DeviceID)})
+		if err != nil {
+			return RunView{}, fmt.Errorf("encode step %s: %w", st.Name, err)
+		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO steps (run_id, name, position, device_id, depends_on) VALUES ($1, $2, $3, $4, $5)`,
-			runID, st.Name, position, st.DeviceID, pq.Array(deps)); err != nil {
+			`INSERT INTO steps (run_id, name, position, device_id, depends_on, lifecycle) VALUES ($1, $2, $3, $4, $5, $6)`,
+			runID, st.Name, position, st.DeviceID, pq.Array(deps), lifecycle); err != nil {
 			return RunView{}, fmt.Errorf("insert step %s: %w", st.Name, err)
 		}
 	}
