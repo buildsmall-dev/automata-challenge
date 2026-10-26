@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Executor–driver messaging v2</title>
+<style>
+:root{
+  --bg:#fafaf8; --fg:#1c1d1f; --muted:#5d6168; --card:#ffffff; --line:#d9dadd;
+  --accent:#2457c5; --accent-bg:#e8eefb;
+  --good:#1b7a45; --good-bg:#e3f3ea;
+  --warn:#9a6200; --warn-bg:#fbf0d9;
+  --bad:#b3341f; --bad-bg:#fbe6e1;
+  --note:#eef0f3;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#131416; --fg:#e8e9eb; --muted:#9a9ea6; --card:#1c1e21; --line:#33363b;
+    --accent:#8fb0ff; --accent-bg:#1b2538;
+    --good:#6fd39b; --good-bg:#17301f;
+    --warn:#e8b95a; --warn-bg:#33290f;
+    --bad:#f08a76; --bad-bg:#3a1b15;
+    --note:#25282c;
+  }
+}
+*{box-sizing:border-box}
+html{background:var(--bg)}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:900px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:1.8rem;line-height:1.2;margin:0 0 4px}
+h2{font-size:1.3rem;margin:44px 0 10px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:1.05rem;margin:0 0 6px}
+p{margin:8px 0}
+ul{margin:6px 0;padding-left:20px}
+li{margin:3px 0}
+code{font:0.88em ui-monospace,Menlo,Consolas,monospace;background:var(--note);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+.sub{color:var(--muted);margin:0 0 6px}
+.status{display:inline-block;font-size:.8rem;padding:2px 10px;border-radius:99px;background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn)}
+.ctx{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin-top:12px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;margin:14px 0}
+.card{background:var(--card);border:1px solid var(--line);border-top:4px solid var(--accent);border-radius:10px;padding:12px 14px}
+.card .n{display:inline-block;width:24px;height:24px;line-height:24px;text-align:center;border-radius:50%;background:var(--accent);color:var(--bg);font-weight:700;font-size:.85rem;margin-right:6px}
+.card p{font-size:.93rem}
+.takeaway{background:var(--accent-bg);border-left:4px solid var(--accent);padding:12px 16px;border-radius:6px;font-weight:600}
+.diagram{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px}
+.diagram svg{display:block;min-width:700px;width:100%;height:auto;color:var(--fg)}
+.opt{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:16px 0}
+.opt h3{font-size:1.15rem}
+.opt h4{margin:12px 0 2px;font-size:.8rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.rests{border-radius:8px;padding:10px 12px;margin-top:12px;background:var(--note)}
+.rests b.v{display:block;margin-top:4px}
+.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--card)}
+table{border-collapse:collapse;width:100%;min-width:640px;font-size:.9rem}
+th,td{text-align:left;vertical-align:top;padding:8px 10px;border-bottom:1px solid var(--line)}
+th{background:var(--note);font-size:.8rem}
+tr:last-child td{border-bottom:0}
+td:first-child{font-weight:600}
+.tag{display:inline-block;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:1px 8px;border-radius:99px;margin-right:6px}
+.t-meas{background:var(--good-bg);color:var(--good)}
+.t-inf{background:var(--accent-bg);color:var(--accent)}
+.t-guess{background:var(--warn-bg);color:var(--warn)}
+.fact{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:10px 0}
+.reco{background:var(--card);border:2px solid var(--accent);border-radius:10px;padding:14px 16px}
+.reco .label{font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--accent)}
+
+.pillrow{margin-top:6px}
+.strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;margin:12px 0}
+.strip div{background:var(--accent-bg);border-left:4px solid var(--accent);border-radius:6px;padding:6px 10px;font-size:.88rem}
+.cards.four{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+td.hl,th.hl{background:var(--accent-bg)}
+th.hl{color:var(--accent)}
+.bad{color:var(--bad);font-weight:700}.ok{color:var(--good);font-weight:700}
+.find{background:var(--card);border:1px solid var(--line);border-left:5px solid var(--warn);border-radius:10px;padding:12px 16px;margin:12px 0}
+.find h3{margin-bottom:4px}
+.find .do{background:var(--note);border-radius:6px;padding:8px 12px;margin-top:8px;font-size:.93rem}
+.tl{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:12px 0}
+.tl .row{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0}
+.chip{font-size:.82rem;padding:3px 10px;border-radius:6px;background:var(--note);border:1px solid var(--line)}
+.chip.crash{background:var(--bad-bg);color:var(--bad);border-color:var(--bad);font-weight:700}
+.chip.ev{background:var(--good-bg);color:var(--good);border-color:var(--good)}
+.chip.led{background:var(--warn-bg);color:var(--warn);border-color:var(--warn)}
+.arrow{color:var(--muted)}
+.outcome{font-size:.92rem;margin:2px 0 14px}
+.note{background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:6px;padding:10px 14px;margin:14px 0}
+.t-acc{background:var(--note);color:var(--muted)}
+.t-out{background:var(--accent-bg);color:var(--accent)}
+.lim{list-style:none;padding:0}
+.lim li{padding:6px 0;border-bottom:1px solid var(--line)}
+.foot{margin-top:40px;color:var(--muted);font-size:.85rem}
+</style>
+</head>
+<body>
+<main>
+
+<h1>Executor–driver messaging v2</h1>
+<p class="sub">Production lens. Option C chosen by the user; amendments from a measured experiment.</p>
+<span class="status">Chosen: C (hybrid), with amendments. Recorded as D1 in docs/decisions.md</span>
+
+<h2>1. What changed since v1</h2>
+<div class="ctx">
+  <ul>
+    <li>v1 weighted <b>simplicity</b> and recommended A (polling).</li>
+    <li>Re-judged on <b>production reliability, scalability, maintainability and operational complexity</b>. The facts didn't change; their weight did.</li>
+    <li>A's key assumption, "we can always ask the instrument", is true of this simulator's complete ledger but false of most real equipment.</li>
+  </ul>
+</div>
+
+<h2>2. Production requirements</h2>
+<div class="cards four">
+  <div class="card"><h3>Fail-safe actuation</h3><p>When in doubt, don't move. A late command is worse than none.</p></div>
+  <div class="card"><h3>Facts survive executor downtime</h3><p>Not only in driver memory.</p></div>
+  <div class="card"><h3>Don't depend on instrument history</h3><p>The ledger is a cross-check, not the only record.</p></div>
+  <div class="card"><h3>Operability</h3><p>Lag, redeliveries and stuck jobs are visible as metrics.</p></div>
+</div>
+<p class="sub">v1's four correctness rules still hold:</p>
+<div class="strip">
+  <div><b>1</b> Durable intent first</div>
+  <div><b>2</b> Predictable JobID checked against ledger</div>
+  <div><b>3</b> Guarded state changes</div>
+  <div><b>4</b> Re-discoverable truth</div>
+</div>
+
+<h2>3. Options compared</h2>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Criterion</th><th>A polling</th><th>B JetStream both ways</th><th class="hl">C hybrid</th></tr></thead>
+  <tbody>
+    <tr><td>Facts survive executor outage + driver restart</td><td><span class="bad">✗</span> ledger only</td><td><span class="ok">✓</span></td><td class="hl"><span class="ok">✓</span></td></tr>
+    <tr><td>No stale physical commands</td><td><span class="ok">✓</span></td><td><span class="bad">✗</span> without extra checks</td><td class="hl"><span class="ok">✓</span> claim before run (§7.1)</td></tr>
+    <tr><td>Scheduling policy (fairness, priority, cancel)</td><td>executor <span class="ok">✓</span></td><td>stream FIFO <span class="bad">✗</span></td><td class="hl">executor <span class="ok">✓</span></td></tr>
+    <tr><td>Multiple executor replicas</td><td>needs run leases</td><td>shared consumer <span class="ok">✓</span></td><td class="hl">shared consumer <span class="ok">✓</span> (scheduling still needs per-run locks)</td></tr>
+    <tr><td>Ops visibility</td><td>logs only</td><td>stream + consumer metrics</td><td class="hl">event stream metrics</td></tr>
+    <tr><td>Audit trail</td><td><span class="bad">✗</span></td><td><span class="ok">✓</span></td><td class="hl"><span class="ok">✓</span></td></tr>
+    <tr><td>Independent of instrument history</td><td><span class="bad">✗</span></td><td><span class="ok">✓</span></td><td class="hl"><span class="ok">✓</span> except the crash window (see §6)</td></tr>
+    <tr><td>Mechanisms to operate</td><td>1</td><td>2 streams + AckWait tuning</td><td class="hl">1 stream + request/reply</td></tr>
+    <tr><td>Challenge scope</td><td>smallest</td><td>largest</td><td class="hl">medium</td></tr>
+  </tbody>
+</table>
+</div>
+<ul>
+  <li><b>B rejected:</b> a durable command queue for physical actions trades a delivery problem for a safety problem (stale commands) and puts scheduling in a FIFO.</li>
+  <li><b>D (shared state in NATS KV) rejected:</b> a second source of truth beside Postgres, with no transactions across them.</li>
+</ul>
+<p class="takeaway">Design rule: durable facts, short-lived intentions, Postgres decides.</p>
+
+<h2>4. Option C topology</h2>
+<div class="diagram">
+<svg viewBox="0 0 900 470" role="img" aria-label="Topology of option C: executor, NATS core and JetStream, driver, instrument, S3" font-family="system-ui,sans-serif" font-size="12">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <g text-anchor="middle" fill="currentColor">
+    <rect x="15" y="40" width="185" height="360" rx="10" fill="var(--accent-bg)" stroke="var(--accent)"/>
+    <text x="107" y="64" font-weight="700">Executor + Postgres</text>
+    <text x="107" y="90">command queue in Postgres</text>
+    <text x="107" y="108">sends only to a device</text>
+    <text x="107" y="124">it believes free</text>
+    <text x="107" y="300">durable pull consumer</text>
+    <text x="107" y="318">idempotent apply,</text>
+    <text x="107" y="334">ack after DB commit</text>
+    <text x="107" y="370">provisions stream at startup</text>
+
+    <rect x="290" y="40" width="330" height="190" rx="10" fill="var(--note)" stroke="var(--line)"/>
+    <text x="455" y="60" font-weight="700">NATS core</text>
+    <rect x="290" y="250" width="330" height="150" rx="10" fill="var(--note)" stroke="var(--line)"/>
+    <text x="455" y="270" font-weight="700">NATS JetStream: LAB_EVENTS</text>
+    <text x="455" y="385" fill-opacity=".7">lab.&lt;device&gt;.evt.*</text>
+
+    <rect x="700" y="40" width="185" height="210" rx="10" fill="var(--good-bg)" stroke="var(--good)"/>
+    <text x="792" y="64" font-weight="700">Driver</text>
+    <text x="792" y="90">checks ledger for job_id</text>
+    <text x="792" y="108">claims job before Run</text>
+    <text x="792" y="226">retries publish until PubAck</text>
+    <rect x="700" y="290" width="185" height="110" rx="10" fill="var(--warn-bg)" stroke="var(--warn)"/>
+    <text x="792" y="320" font-weight="700">Instrument + ledger</text>
+    <text x="792" y="340">durable record of</text>
+    <text x="792" y="356">every execution</text>
+    <rect x="360" y="425" width="190" height="36" rx="8" fill="var(--card)" stroke="var(--line)"/>
+    <text x="455" y="448" font-weight="700">S3 (plate data)</text>
+  </g>
+  <g stroke="currentColor" stroke-width="1.5" fill="none" marker-end="url(#ah)" fill-opacity="0">
+    <line x1="200" y1="100" x2="698" y2="100"/>
+    <line x1="698" y1="128" x2="202" y2="128" stroke-dasharray="5 4"/>
+    <line x1="200" y1="190" x2="698" y2="190"/>
+    <line x1="698" y1="210" x2="202" y2="210" stroke-dasharray="5 4"/>
+    <line x1="698" y1="320" x2="622" y2="320"/>
+    <line x1="290" y1="340" x2="202" y2="340"/>
+    <line x1="792" y1="250" x2="792" y2="288"/>
+    <line x1="720" y1="250" x2="552" y2="428"/>
+  </g>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="450" y="90">request lab.&lt;device&gt;.cmd.run</text>
+    <text x="450" y="116" fill-opacity=".8">{v, job_id, run_id, step, attempt}</text>
+    <text x="450" y="146" fill-opacity=".8">reply: accepted | busy | known · then claim: go | abort</text>
+    <text x="450" y="180">request lab.&lt;device&gt;.job (reconcile)</text>
+    <text x="450" y="228" fill-opacity=".8" font-size="11">answered from ledger + storage</text>
+    <text x="660" y="312" font-size="11">publish</text>
+    <text x="500" y="300" fill-opacity=".8" font-size="11">accepted / started / finished,</text>
+    <text x="500" y="316" fill-opacity=".8" font-size="11">Nats-Msg-Id = job_id + kind</text>
+    <text x="245" y="332" font-size="11">pull</text>
+    <text x="835" y="274" font-size="11">Run</text>
+    <text x="680" y="370" font-size="11" text-anchor="end">upload</text>
+  </g>
+</svg>
+</div>
+<ul>
+  <li><b>Commands:</b> core request <code>lab.&lt;device&gt;.cmd.run {v, job_id, run_id, step, attempt}</code>, reply <code>accepted | busy | known</code>. The executor keeps the queue in Postgres and sends only to a device it believes free.</li>
+  <li><b>Claim before run:</b> before <code>inst.Run</code> the driver requests <code>lab.executor.claim {job_id}</code>; only <code>go</code> starts physical work (§7.1).</li>
+  <li><b>Events:</b> the driver publishes accepted / started / finished to JetStream stream <code>LAB_EVENTS</code> (subjects <code>lab.&lt;device&gt;.evt.*</code>) with <code>Nats-Msg-Id</code> = job_id + kind, retried until PubAck. The executor uses a durable pull consumer, applies events idempotently, and acks after the DB commit.</li>
+  <li><b>Reconcile query:</b> <code>lab.&lt;device&gt;.job</code> request/reply, answered from ledger + storage. Used on executor startup and for in-flight steps past their deadline.</li>
+  <li>The executor provisions the stream (<code>CreateOrUpdateStream</code>) at startup; drivers never create infra.</li>
+</ul>
+
+<h2>5. Disconnect experiment <span class="tag t-meas">Measured</span></h2>
+<p><b>Setup:</b> a probe container on lab-network is partitioned with <code>docker network disconnect/connect</code> (same as <code>chaos.sh disconnect</code>); the host-side peer is never partitioned. Every 200ms a core publish, every 1s a request (2s timeout), every 1s a JetStream publish (5s timeout, Msg-Id).</p>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Run</th><th>Client noticed?</th><th>Core msgs lost</th><th>Timed-out requests later delivered</th><th>JS publishes reported failed → actually stored</th></tr></thead>
+  <tbody>
+    <tr><td>default pings, 6s partition</td><td>never noticed (TCP survived)</td><td>0 (all arrived late)</td><td>not logged (receive logging added after run 1)</td><td>1 → 1</td></tr>
+    <tr><td>default pings, 20s</td><td>never noticed</td><td>0 (all late)</td><td>6 of 6 (all at once, ~20s late)</td><td>3 → 3</td></tr>
+    <tr><td>2s pings, 6s</td><td>"stale connection" after ~6s, reconnected 1s after heal</td><td>0</td><td>2 of 2</td><td>1 → 1</td></tr>
+    <tr><td>2s pings, 20s</td><td>stale after ~6s, reconnected ~1s after heal</td><td>30 lost (written into the dead socket)</td><td>4 of 6 delivered late, 2 lost</td><td>3 → 2 (43 of 44 stored overall)</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="find">
+  <h3>F1. A timeout does not mean not delivered.</h3>
+  <p>Timed-out requests were delivered up to ~20s late, after the sender gave up. A "run job" command can reach a driver after the executor timed out, even after a cancel.</p>
+  <div class="do"><b>→</b> The driver claims every job with the executor before running it (§7.1), so a late command after a cancel is refused. Expiry would only narrow the window, so it isn't needed. The executor treats a timeout as "unknown", resends the same job_id (never a new attempt), and doesn't consider the device free.</div>
+</div>
+<div class="find">
+  <h3>F2. A failed JetStream publish may have been stored.</h3>
+  <p>7 of 8 publishes that returned "context deadline exceeded" were in the stream.</p>
+  <div class="do"><b>→</b> The driver retries with the same <code>Nats-Msg-Id</code> (the server dedupes within its 2-minute window). The executor applies events idempotently, because partitions longer than the window can still produce duplicates.</div>
+</div>
+<div class="find">
+  <h3>F3. Ping interval trades lateness for loss.</h3>
+  <p>Default pings (the drivers' current setting, 2 min) made a 20s partition invisible: nothing lost, everything late. 2s pings detected it in ~6s but lost what was written into the dead socket; later publishes were buffered and flushed on reconnect.</p>
+  <div class="do"><b>→</b> Both are handled by F1 + F2, so correctness doesn't depend on the setting. Set it explicitly (a few seconds) for faster detection and visible disconnect events.</div>
+</div>
+
+<h2>6. Driver crashes after the operation, before the event <span class="tag t-inf">Inferred</span></h2>
+<p class="sub">From <code>instrument.go</code>: the ledger is updated to completed before <code>Run</code> returns the Outcome, and a restart leaves completed entries untouched.</p>
+<div class="tl">
+  <b>W1. Plate reader, before the S3 upload</b>
+  <div class="row"><span class="chip led">ledger completed</span><span class="arrow">→</span><span class="chip crash">crash</span><span class="arrow">→</span><span class="chip">S3 upload</span><span class="arrow">→</span><span class="chip ev">event</span></div>
+  <p class="outcome">Data bytes exist only in driver memory, so they are <b>lost for good</b>. Ledger has completed + sha256, storage has nothing. True record: that attempt failed, "data lost before storage". Retry the read (reads are retryable); the ledger will honestly show two executions.</p>
+  <b>W2. After upload, before JetStream ack</b>
+  <div class="row"><span class="chip led">ledger completed</span><span class="arrow">→</span><span class="chip">S3 upload</span><span class="arrow">→</span><span class="chip crash">crash</span><span class="arrow">→</span><span class="chip ev">event</span></div>
+  <p class="outcome"><b>Recoverable.</b> The object exists at the deterministic key; no event. Data present, hash matches ledger.</p>
+  <b>W3. Non-data step completed, before the event</b>
+  <div class="row"><span class="chip led">ledger completed</span><span class="arrow">→</span><span class="chip crash">crash</span><span class="arrow">→</span><span class="chip ev">event</span></div>
+  <p class="outcome" style="margin-bottom:0"><b>Recoverable from the ledger</b> (completed, no event).</p>
+</div>
+<h3>Recovery paths (belt and braces)</h3>
+<ul>
+  <li><b>R1. Driver startup replay:</b> on start, read the ledger and publish finished events for recent executions, checking storage for the plate object. Msg-Id dedupe + idempotent apply make repeats harmless.</li>
+  <li><b>R2. Executor deadline + reconcile query:</b> covers a driver that stays down or restarts silently.</li>
+</ul>
+<div class="note">
+  Both paths rely on the instrument's own durable record. Without it (some real devices), this window cannot be closed in software: the honest record is "outcome unknown", and for the liquid handler that needs a human.<br>
+  Also a simulator artifact: a driver crash <i>during</i> a job here kills the simulated work and the ledger marks it hung, "instrument restarted during the job". A real instrument would carry on.
+</div>
+
+<h2>7. Clarified cases <span class="tag t-inf">Inferred</span></h2>
+
+<h3>7.1 No command runs after a cancel: claim before run</h3>
+<p>Expiry only narrows the late-command window. Instead, the driver asks <code>lab.executor.claim {job_id}</code> before <code>inst.Run</code>, and the executor does one conditional update:</p>
+<pre class="ctx" style="overflow-x:auto;font-size:.85rem"><code>UPDATE steps SET phase = 'claimed'
+ WHERE job_id = $1 AND phase = 'dispatched'
+   AND run is not cancelled   -- serialises with CancelRun on the same row</code></pre>
+<div class="tablewrap"><table>
+  <thead><tr><th>Claim reply</th><th>Driver does</th></tr></thead>
+  <tbody>
+    <tr><td>go (1 row)</td><td>Runs the job. A later cancel can't stop it, so the record shows its real outcome.</td></tr>
+    <tr><td>abort (0 rows)</td><td>Nothing physical. Cancelled, superseded or unknown job.</td></tr>
+    <tr><td>timeout</td><td><b>Don't run.</b> Retry the claim with the same job_id; claims are idempotent.</td></tr>
+  </tbody>
+</table></div>
+<ul>
+  <li><b>Why it holds:</b> cancel and claim change the same row, so Postgres orders them and exactly one wins. A cancel stops what hasn't started.</li>
+  <li><b>Lost "go":</b> the DB says claimed but nothing ran. The deadline expires, the reconcile query finds no ledger entry for the job_id, and the step returns to dispatched with the same job_id.</li>
+  <li><b>Executor down:</b> no new physical work starts (fail-safe).</li>
+</ul>
+
+<h3>7.2 Driver stays offline and reconciliation isn't possible</h3>
+<div class="tablewrap"><table>
+  <thead><tr><th>Contact lost</th><th>What we know</th><th>Record says</th></tr></thead>
+  <tbody>
+    <tr><td>Before the claim was granted</td><td>Nothing ran (our own DB proves it)</td><td>Step <code>pending</code>; the run waits, other branches continue; a cancel makes it <code>cancelled</code></td></tr>
+    <tr><td>After the claim was granted</td><td>It may be running, done, failed or hung</td><td>Step <code>running</code>, error "driver unreachable since T, outcome unknown"</td></tr>
+  </tbody>
+</table></div>
+<ul>
+  <li><b>Unknown stays unknown.</b> Never mark it failed on a timer: if it completed, the record would contradict the ledger. Internal phase <code>unknown</code> + last contact time; GraphQL can expose <code>outcomeKnown</code>.</li>
+  <li><b>Late facts always win.</b> When the driver returns, R1/R2 apply the real outcome, even hours later and even if the run was cancelled meanwhile. A cancel never overwrites a running step.</li>
+  <li>A driver that never returns: the step stays unknown. An operator "declare lost" action (recorded as a human statement) is deferred.</li>
+</ul>
+
+<h3>7.3 A completed read vs missing data</h3>
+<p>Two independent sources: the <b>ledger</b> (read happened, sha256) and <b>storage</b> (object at <code>runs/&lt;run&gt;/&lt;step&gt;/&lt;job_id&gt;.csv</code>). The executor fetches the object and hashes it itself before it sets <code>data_ref</code>.</p>
+<div class="tablewrap"><table>
+  <thead><tr><th>Ledger</th><th>Object</th><th>Driver</th><th>Step</th></tr></thead>
+  <tbody>
+    <tr><td>completed, sha X</td><td>hash X</td><td>any</td><td><b>completed</b>, data_ref set</td></tr>
+    <tr><td>completed, sha X</td><td>missing</td><td>alive, has bytes</td><td><b>running</b> (phase storing), "storage unavailable, retrying"</td></tr>
+    <tr><td>completed, sha X</td><td>missing</td><td>restarted, bytes gone</td><td>attempt <b>failed</b> "data lost before storage", read retried</td></tr>
+    <tr><td>completed, sha X</td><td>hash ≠ X</td><td>any</td><td>re-upload if bytes held, else <b>failed</b> "stored data does not match"</td></tr>
+    <tr><td>failed / hung</td><td>—</td><td>any</td><td>failure / hang policy</td></tr>
+    <tr><td>—</td><td>—</td><td>unreachable</td><td><b>running</b>, outcome unknown (7.2)</td></tr>
+  </tbody>
+</table></div>
+<p class="sub">An optional <code>measured</code> event lets the record say "read done, storing data" before the upload.</p>
+
+<h3>7.4 Internal phases</h3>
+<div class="strip">
+  <div><code>dispatched</code> → API pending</div>
+  <div><code>claimed</code> · <code>running</code> · <code>storing</code> · <code>unknown</code> → API running</div>
+  <div><code>completed</code> · <code>failed</code> · <code>cancelled</code> → same</div>
+</div>
+<p class="sub">The scheduler counts a dispatched step as occupying its device.</p>
+
+<h2>8. Remaining limitations</h2>
+<ul class="lim">
+  <li><span class="tag t-acc">accepted</span>Crash window W1 loses plate data; costs a re-read.</li>
+  <li><span class="tag t-acc">accepted</span>Outcome after a driver crash is only as durable as the instrument's history (stated in the note).</li>
+  <li><span class="tag t-acc">accepted</span>Claim before run needs the executor reachable before every physical start: one extra round trip, and no new work while it is down (fail-safe).</li>
+  <li><span class="tag t-acc">accepted</span>A driver that never comes back leaves a claimed step "running, outcome unknown" for good. An operator "declare lost" action is deferred.</li>
+  <li><span class="tag t-acc">accepted</span>A re-read after data loss is a second ledger execution: honest, but it fails acceptance check 5 under chaos.</li>
+  <li><span class="tag t-acc">accepted</span>JetStream dedupe window is 2 minutes; longer partitions rely on idempotent apply.</li>
+  <li><span class="tag t-acc">accepted</span>Driver holds an event in memory until PubAck; a crash is recovered by R1/R2.</li>
+  <li><span class="tag t-out">out of scope</span>Single NATS server, single-replica stream: NATS down = no progress (fail-safe, not HA).</li>
+  <li><span class="tag t-out">out of scope</span>Single executor; replicas would need per-run locking.</li>
+  <li><span class="tag t-acc">accepted</span>Measured on Docker Desktop for Mac with <code>docker network disconnect</code>; real networks may behave differently.</li>
+</ul>
+
+<p class="foot">Decision record: docs/decisions.md D1 · experiment log: docs/chaos-log.md C1 · probe: tmp/_natsprobe (local).</p>
+</main>
+</body>
+</html>

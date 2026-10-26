@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Executor–driver messaging</title>
+<style>
+:root{
+  --bg:#fafaf8; --fg:#1c1d1f; --muted:#5d6168; --card:#ffffff; --line:#d9dadd;
+  --accent:#2457c5; --accent-bg:#e8eefb;
+  --good:#1b7a45; --good-bg:#e3f3ea;
+  --warn:#9a6200; --warn-bg:#fbf0d9;
+  --bad:#b3341f; --bad-bg:#fbe6e1;
+  --note:#eef0f3;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#131416; --fg:#e8e9eb; --muted:#9a9ea6; --card:#1c1e21; --line:#33363b;
+    --accent:#8fb0ff; --accent-bg:#1b2538;
+    --good:#6fd39b; --good-bg:#17301f;
+    --warn:#e8b95a; --warn-bg:#33290f;
+    --bad:#f08a76; --bad-bg:#3a1b15;
+    --note:#25282c;
+  }
+}
+*{box-sizing:border-box}
+html{background:var(--bg)}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:900px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:1.8rem;line-height:1.2;margin:0 0 4px}
+h2{font-size:1.3rem;margin:44px 0 10px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:1.05rem;margin:0 0 6px}
+p{margin:8px 0}
+ul{margin:6px 0;padding-left:20px}
+li{margin:3px 0}
+code{font:0.88em ui-monospace,Menlo,Consolas,monospace;background:var(--note);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+.sub{color:var(--muted);margin:0 0 6px}
+.status{display:inline-block;font-size:.8rem;padding:2px 10px;border-radius:99px;background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn)}
+.ctx{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin-top:12px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;margin:14px 0}
+.card{background:var(--card);border:1px solid var(--line);border-top:4px solid var(--accent);border-radius:10px;padding:12px 14px}
+.card .n{display:inline-block;width:24px;height:24px;line-height:24px;text-align:center;border-radius:50%;background:var(--accent);color:var(--bg);font-weight:700;font-size:.85rem;margin-right:6px}
+.card p{font-size:.93rem}
+.takeaway{background:var(--accent-bg);border-left:4px solid var(--accent);padding:12px 16px;border-radius:6px;font-weight:600}
+.diagram{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px}
+.diagram svg{display:block;min-width:700px;width:100%;height:auto;color:var(--fg)}
+.opt{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:16px 0}
+.opt h3{font-size:1.15rem}
+.opt h4{margin:12px 0 2px;font-size:.8rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.rests{border-radius:8px;padding:10px 12px;margin-top:12px;background:var(--note)}
+.rests b.v{display:block;margin-top:4px}
+.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--card)}
+table{border-collapse:collapse;width:100%;min-width:640px;font-size:.9rem}
+th,td{text-align:left;vertical-align:top;padding:8px 10px;border-bottom:1px solid var(--line)}
+th{background:var(--note);font-size:.8rem}
+tr:last-child td{border-bottom:0}
+td:first-child{font-weight:600}
+.tag{display:inline-block;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:1px 8px;border-radius:99px;margin-right:6px}
+.t-meas{background:var(--good-bg);color:var(--good)}
+.t-inf{background:var(--accent-bg);color:var(--accent)}
+.t-guess{background:var(--warn-bg);color:var(--warn)}
+.fact{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:10px 0}
+.reco{background:var(--card);border:2px solid var(--accent);border-radius:10px;padding:14px 16px}
+.reco .label{font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--accent)}
+</style>
+</head>
+<body>
+<main>
+
+<h1>Executor–driver messaging</h1>
+<p class="sub">How an executor and instrument drivers communicate over NATS.</p>
+<span class="status">Status: awaiting choice</span>
+
+<h2>1. The question</h2>
+<p><b>How do commands reach the drivers, and how do outcomes get back to the executor, so the run record stays true when messages are lost, duplicated or late, and when processes or networks drop?</b></p>
+<div class="ctx">
+  <ul>
+    <li>The <b>executor</b> owns runs and keeps them in Postgres. It talks to 3 drivers (liquid handler, incubator, plate reader) over NATS.</li>
+    <li>Each instrument does one job at a time and keeps a durable <b>ledger</b> of every physical execution, written before work starts and surviving restarts.</li>
+    <li>The plate reader produces data that must be stored in S3.</li>
+  </ul>
+</div>
+
+<h2>2. Correctness comes from four things, not the transport</h2>
+<div class="cards">
+  <div class="card"><h3><span class="n">1</span>Durable intent first</h3>
+    <p>The executor writes <code>job_id</code> + <code>attempt</code> to Postgres <b>before</b> sending, so after a crash it knows what it may have sent.</p></div>
+  <div class="card"><h3><span class="n">2</span>Predictable JobID</h3>
+    <p>E.g. <code>run-abc/combine/1</code>. On any command the driver checks the instrument ledger: already running or done? Report it, don't run again. A duplicate message never becomes a second physical run.</p></div>
+  <div class="card"><h3><span class="n">3</span>Guarded state changes</h3>
+    <p>E.g. <code>UPDATE steps … WHERE job_id=$1 AND status='running'</code>. Late or duplicate results can't move a step backwards or overwrite a newer attempt.</p></div>
+  <div class="card"><h3><span class="n">4</span>Re-discoverable truth</h3>
+    <p>The executor can always ask the driver (answers from the ledger) or check storage. Data key derived from job id (<code>runs/&lt;run&gt;/&lt;step&gt;/&lt;job_id&gt;.csv</code>); compare its sha256 with the ledger's.</p></div>
+</div>
+<p class="takeaway">The transport decides how much buffering and retrying we write ourselves — not whether we're correct.</p>
+
+<h2>3. Life of a job</h2>
+<div class="diagram">
+<svg viewBox="0 0 900 680" role="img" aria-label="Sequence diagram of a job from executor to instrument and back" font-family="system-ui,sans-serif" font-size="12">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <!-- lane headers -->
+  <g font-weight="700" text-anchor="middle">
+    <rect x="30" y="10" width="180" height="40" rx="8" fill="var(--accent-bg)" stroke="var(--accent)"/>
+    <text x="120" y="35" fill="currentColor">Executor + Postgres</text>
+    <rect x="250" y="10" width="180" height="40" rx="8" fill="var(--note)" stroke="var(--line)"/>
+    <text x="340" y="35" fill="currentColor">NATS</text>
+    <rect x="470" y="10" width="180" height="40" rx="8" fill="var(--good-bg)" stroke="var(--good)"/>
+    <text x="560" y="35" fill="currentColor">Driver</text>
+    <rect x="700" y="10" width="180" height="40" rx="8" fill="var(--warn-bg)" stroke="var(--warn)"/>
+    <text x="790" y="35" fill="currentColor">Instrument + ledger</text>
+  </g>
+  <g stroke="currentColor" stroke-opacity=".3" stroke-dasharray="4 4">
+    <line x1="120" y1="50" x2="120" y2="670"/>
+    <line x1="340" y1="50" x2="340" y2="670"/>
+    <line x1="560" y1="50" x2="560" y2="670"/>
+    <line x1="790" y1="50" x2="790" y2="670"/>
+  </g>
+
+  <!-- 0 -->
+  <rect x="15" y="62" width="210" height="40" rx="6" fill="var(--note)" stroke="var(--line)"/>
+  <text x="120" y="78" text-anchor="middle" fill="currentColor">step pending; NextSteps says go</text>
+  <text x="120" y="93" text-anchor="middle" fill="currentColor">write job_id, attempt=1, dispatched</text>
+  <!-- 1 -->
+  <line x1="120" y1="132" x2="558" y2="132" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah)"/>
+  <text x="340" y="124" text-anchor="middle" fill="currentColor">"run job_id"</text>
+  <circle cx="340" cy="132" r="4" fill="currentColor"/>
+  <!-- 2 -->
+  <rect x="455" y="156" width="210" height="26" rx="6" fill="var(--note)" stroke="var(--line)"/>
+  <text x="560" y="173" text-anchor="middle" fill="currentColor">already in ledger? no</text>
+  <!-- 3 -->
+  <line x1="560" y1="214" x2="788" y2="214" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah)"/>
+  <text x="674" y="206" text-anchor="middle" fill="currentColor">inst.Run(job)</text>
+  <!-- 4 -->
+  <rect x="685" y="236" width="210" height="26" rx="6" fill="var(--warn-bg)" stroke="var(--warn)"/>
+  <text x="790" y="253" text-anchor="middle" fill="currentColor">ledger: running</text>
+  <!-- 5 -->
+  <rect x="685" y="284" width="210" height="42" rx="6" fill="var(--warn-bg)" stroke="var(--warn)"/>
+  <text x="790" y="300" text-anchor="middle" fill="currentColor">~2s work, then ledger: completed</text>
+  <text x="790" y="316" text-anchor="middle" fill="currentColor">(+ sha256 if plate reader)</text>
+  <!-- 6 -->
+  <line x1="788" y1="356" x2="562" y2="356" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah)"/>
+  <text x="674" y="348" text-anchor="middle" fill="currentColor">Outcome</text>
+  <!-- 7 -->
+  <rect x="455" y="378" width="210" height="42" rx="6" fill="var(--good-bg)" stroke="var(--good)"/>
+  <text x="560" y="394" text-anchor="middle" fill="currentColor">plate reader: PUT data to S3</text>
+  <text x="560" y="410" text-anchor="middle" fill="currentColor">(retry until stored)</text>
+  <!-- 8 -->
+  <line x1="560" y1="458" x2="122" y2="458" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah)"/>
+  <circle cx="340" cy="458" r="4" fill="currentColor"/>
+  <text x="340" y="450" text-anchor="middle" fill="currentColor">"job_id completed, times, ref"</text>
+  <!-- 9 -->
+  <rect x="15" y="480" width="210" height="42" rx="6" fill="var(--accent-bg)" stroke="var(--accent)"/>
+  <text x="120" y="496" text-anchor="middle" fill="currentColor">guarded UPDATE</text>
+  <text x="120" y="512" text-anchor="middle" fill="currentColor">step: completed</text>
+  <!-- 10 -->
+  <rect x="15" y="548" width="210" height="42" rx="6" fill="var(--note)" stroke="var(--line)"/>
+  <text x="120" y="564" text-anchor="middle" fill="currentColor">NextSteps dispatches</text>
+  <text x="120" y="580" text-anchor="middle" fill="currentColor">the next steps</text>
+
+  <text x="450" y="640" text-anchor="middle" fill="currentColor" fill-opacity=".7">Arrows through the NATS lane are messages; the dot marks the hop.</text>
+</svg>
+</div>
+<p class="sub">The diagram shows the happy path. The options below differ in how the two arrows crossing NATS are carried and what the executor does when one is lost.</p>
+
+<h2>4. Three options</h2>
+
+<div class="opt">
+  <h3>A. Core request/reply; executor asks for the truth</h3>
+  <h4>How it works</h4>
+  <ul>
+    <li><code>lab.&lt;device&gt;.run {job_id, run_id, step}</code>: driver replies <code>accepted | busy | known</code> and runs in the background.</li>
+    <li><code>lab.&lt;device&gt;.job {job_id}</code>: driver answers from ledger + upload state: <code>running | completed(times, ref) | failed(retryable) | hung</code>.</li>
+    <li>Executor loop every ~500ms: ask about every in-flight job, apply with a guarded update; call NextSteps and dispatch.</li>
+    <li>Optional lossy core "job changed" nudge so the executor asks immediately. Losing it is harmless.</li>
+  </ul>
+  <h4>Makes easy</h4>
+  <ul>
+    <li>Recovery <i>is</i> the normal path (exercised every run).</li>
+    <li>No stream state.</li>
+    <li>Cancel = stop dispatching (nothing queued).</li>
+    <li>Busy device: step stays pending (nothing ran).</li>
+  </ul>
+  <h4>Makes hard</h4>
+  <ul>
+    <li>Up to one tick of latency (times come from the ledger, so no accuracy loss).</li>
+    <li>Executor does cross-run device queueing.</li>
+    <li>Wouldn't scale to thousands of devices (not a concern here).</li>
+  </ul>
+  <div class="rests">
+    <b>Rests on:</b> "anything the executor needs it can find out again by asking."
+    <b class="v" style="color:var(--good)">Verdict: true for physical outcomes (durable ledger) and for data (predictable key + sha).</b>
+    <span>Not true for plate data bytes never uploaded if the driver restarts first. That is equally true for B and C. The honest record is a failed attempt "data lost", retried (reads are retryable).</span>
+  </div>
+</div>
+
+<div class="opt">
+  <h3>B. JetStream both ways</h3>
+  <h4>How it works</h4>
+  <ul>
+    <li>Stream <code>CMDS</code> (<code>cmd.&lt;device&gt;</code>, work-queue, durable pull consumer per device, <code>MaxAckPending=1</code>); stream <code>EVENTS</code> (<code>evt.&lt;device&gt;</code>, durable consumer on the executor).</li>
+    <li>Commands published with <code>Nats-Msg-Id=job_id</code>.</li>
+    <li>Driver: fetch, ledger check, run, publish started/finished (retry until PubAck), then ack the command (InProgress heartbeats meanwhile).</li>
+    <li>Executor applies events in a DB transaction, acks after commit.</li>
+  </ul>
+  <h4>Makes easy</h4>
+  <ul>
+    <li>Messages wait across executor outages and driver disconnects.</li>
+    <li>Natural per-device queue across runs.</li>
+    <li>Event history.</li>
+  </ul>
+  <h4>Makes hard</h4>
+  <ul>
+    <li>AckWait vs step duration and 30s hangs (lost heartbeat means redelivery while still running).</li>
+    <li>2-minute dedupe window.</li>
+    <li>Queued commands for runs cancelled since.</li>
+    <li>A second place state lives (stream vs Postgres).</li>
+  </ul>
+  <div class="rests">
+    <b>Rests on:</b> "durable messaging keeps the record true."
+    <b class="v" style="color:var(--warn)">Verdict: only partly. It adds buffering, not correctness.</b>
+    <ul>
+      <li>At-least-once means duplicates (still need the ledger check).</li>
+      <li>A crash between DB write and publish loses the command (still need reconcile).</li>
+      <li>Hangs send no event (still need a deadline).</li>
+    </ul>
+  </div>
+</div>
+
+<div class="opt">
+  <h3>C. Hybrid: request/reply commands + JetStream events + status query</h3>
+  <h4>How it works</h4>
+  <ul>
+    <li>Commands as in A (synchronous, no stale queue).</li>
+    <li>Results go to the EVENTS stream (Msg-Id, retried until acked), consumed durably.</li>
+    <li>A's <code>lab.&lt;device&gt;.job</code> query for startup recovery and silent steps.</li>
+  </ul>
+  <h4>Makes easy</h4>
+  <ul><li>Buffering in the direction that matters most (driver facts while the executor is down).</li></ul>
+  <h4>Makes hard</h4>
+  <ul>
+    <li>Two mechanisms, two recovery paths.</li>
+    <li>Still needs A's query.</li>
+  </ul>
+  <div class="rests">
+    <b>Rests on:</b> "push events are needed for correctness or latency."
+    <b class="v" style="color:var(--warn)">Verdict: not for correctness. For latency, a core nudge gets most of the way.</b>
+  </div>
+</div>
+
+<h2>5. What happens when things fail</h2>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Fault</th><th>A</th><th>B</th><th>C</th></tr></thead>
+  <tbody>
+    <tr><td>Command or its reply lost</td><td>Resend same job_id; driver says "known"</td><td>Stored or not; if publish unacked, reconcile resends</td><td>Same as A</td></tr>
+    <tr><td>Duplicate command</td><td>Ledger check, no rerun</td><td>Msg-Id dedupe (2 min), then ledger check</td><td>Ledger check</td></tr>
+    <tr><td>Executor killed mid-run</td><td>Next tick after restart asks about every in-flight job</td><td>Events wait; crash between DB write and publish needs reconcile</td><td>Events wait; startup query covers the gap</td></tr>
+    <tr><td>Executor disconnected</td><td>Questions time out, steps stay running (no evidence, no claim)</td><td>Events buffer, then consumed</td><td>Events buffer</td></tr>
+    <tr><td>Driver disconnected mid-job</td><td>Instrument finishes; questions time out; after reconnect the answer is completed</td><td>Driver retries publish; AckWait may redeliver (ledger check makes it safe)</td><td>Driver retries publish</td></tr>
+    <tr><td>Storage down after a read</td><td>Driver retries upload, answers "uploading"; record stays running</td><td>Driver delays "finished"</td><td>Same</td></tr>
+    <tr><td>Instrument hangs</td><td>Driver answers running; executor deadline then hang policy</td><td>No event; needs a deadline anyway</td><td>Needs a deadline</td></tr>
+    <tr><td>Run cancelled</td><td>Stop dispatching; nothing queued</td><td>Queued commands still delivered, must be dropped</td><td>Nothing queued</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2>6. What we know</h2>
+<div class="fact"><span class="tag t-inf">Inferred</span> from code:
+  <ul>
+    <li>The ledger records the JobID before work and survives restarts.</li>
+    <li><code>Status()</code> shows the current job and every execution.</li>
+    <li>Plate reader bytes exist only in memory in the Outcome.</li>
+    <li>Both processes reconnect to NATS forever.</li>
+  </ul>
+</div>
+<div class="fact"><span class="tag t-guess">Guess</span> worth measuring: what <code>chaos.sh disconnect</code> (<code>docker network disconnect</code>) does to an open NATS connection.
+  <ul>
+    <li>The TCP connection may survive a 2–7s gap, or the client may notice only via pings (nats.go default 2 min × 2), silently losing core publishes in the window.</li>
+    <li>Matters a lot for B/C; A's correctness doesn't depend on it.</li>
+    <li><b>Proposed ~10 min experiment:</b> publish numbered core messages every 200ms plus a request every second while disconnecting the container. Record what arrives, how long requests take to fail, and when the client notices.</li>
+  </ul>
+</div>
+<p class="sub"><span class="tag t-meas">Measured</span> nothing yet.</p>
+
+<h2>7. Recommendation</h2>
+<div class="reco">
+  <div class="label">Recommendation, not the decision &middot; status: awaiting choice</div>
+  <h3 style="margin-top:6px">A + lossy core nudge</h3>
+  <p><b>Why:</b></p>
+  <ul>
+    <li>Every guarantee rests on things durable on their own (Postgres, ledger, storage), not on messages getting through.</li>
+    <li>The recovery path is the normal path.</li>
+    <li>Smallest system to explain.</li>
+  </ul>
+  <p><b>Honest cost:</b> no JetStream, although the README switches it on. Defensible because JetStream buys buffering, and this design doesn't need buffering to be correct.</p>
+  <p><b>Would change my mind if:</b></p>
+  <ul>
+    <li>The disconnect experiment shows requests hanging for minutes (fixable with ping settings).</li>
+    <li>Queueing several runs per device is wanted (B gives it free).</li>
+    <li>Stream event history is wanted as part of the record.</li>
+  </ul>
+</div>
+
+</main>
+</body>
+</html>
