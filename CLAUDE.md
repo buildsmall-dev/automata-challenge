@@ -47,6 +47,8 @@ completed" is a claim, not evidence.
 - `/decide <question>` for a design fork. Recorded in `docs/decisions.md`.
 - `/slice <behaviour>` for one small change, built from a failing check, and opened as one PR.
 - `/break <fault>` for a chaos experiment. Recorded in `docs/chaos-log.md`.
+- **Raise only blockers.** A finding that would make the record false, or the slice's
+  check meaningless, is fixed in the slice. Everything else goes in `docs/concerns.md`.
 
 Git:
 - `main` holds the original challenge. `dev` is the integration branch.

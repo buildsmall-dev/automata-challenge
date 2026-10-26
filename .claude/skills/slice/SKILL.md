@@ -36,7 +36,8 @@ and say so before starting.
 
 7. **Codex review, once.** Commit, then run `./scripts/codex-review.sh` (read-only,
    diffs against `dev`, prints only Codex's verdict; takes about a minute). Triage each finding: fix it, defer it, or reject it with a reason. Do not apply
-   fixes silently.
+   fixes silently. Bring only blockers to the user; add non-blocking findings (Claude's
+   and Codex's) to `docs/concerns.md`.
 
 8. **Explain it to the user.** This is the review conversation, so write it to teach:
    - **How it works:** the path a message or request takes, file:line references.
