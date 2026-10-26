@@ -74,14 +74,16 @@ func TestStepLifecycle(t *testing.T) {
 		{"the same checks arriving in reverse order give the same record", reader,
 			[]Fact{dispatched, claimed, ran(OutcomeCompleted, "X"), stored("Y", t3), stored("X", t2)}, PhaseCompleted, "", true},
 
-		{"data lost before storage fails the read", reader,
-			[]Fact{dispatched, claimed, ran(OutcomeCompleted, "X"), lost}, PhaseFailed, "", false},
-		{"data lost before finished arrives fails it once finished arrives", reader,
-			[]Fact{dispatched, claimed, started, lost, ran(OutcomeCompleted, "X")}, PhaseFailed, "", false},
+		// A lost report is not proof: an upload from before the driver restarted
+		// may still land (D3). Only storage, or a decision, can settle it.
+		{"data lost before storage leaves the read unresolved", reader,
+			[]Fact{dispatched, claimed, ran(OutcomeCompleted, "X"), lost}, PhaseUnresolved, "may still", false},
+		{"data lost before finished arrives: unresolved once finished arrives", reader,
+			[]Fact{dispatched, claimed, started, lost, ran(OutcomeCompleted, "X")}, PhaseUnresolved, "may still", false},
 		{"data lost, but storage has a matching copy: completed", reader,
 			[]Fact{dispatched, claimed, ran(OutcomeCompleted, "X"), lost, stored("X", t2)}, PhaseCompleted, "", true},
-		{"data lost and the stored copy does not match: failed", reader,
-			[]Fact{dispatched, claimed, ran(OutcomeCompleted, "X"), stored("Y", t2), lost}, PhaseFailed, "", false},
+		{"data lost and the stored copy does not match: unresolved", reader,
+			[]Fact{dispatched, claimed, ran(OutcomeCompleted, "X"), stored("Y", t2), lost}, PhaseUnresolved, "does not match", false},
 		{"data lost for another job is ignored", reader,
 			[]Fact{dispatched, claimed, ran(OutcomeCompleted, "X"), DataLost{JobID: "run-1/read_plate/0"}}, PhaseStoring, "", false},
 		{"a completed read with no ledger digest is unresolved", reader,
@@ -149,8 +151,8 @@ func TestVerifiedCompletionStaysCompleted(t *testing.T) {
 
 func TestDataLostIsExplained(t *testing.T) {
 	s := applyAll(reader, dispatched, claimed, ran(OutcomeCompleted, "X"), lost)
-	if e := s.APIError(); e == nil || !strings.Contains(*e, "lost before storage") {
-		t.Errorf("failed read must say its data was lost, got %v", e)
+	if e := s.APIError(); e == nil || !strings.Contains(*e, "lost") || s.Phase().APIStatus() != StepRunning {
+		t.Errorf("a read reported lost must say so and stay running (unresolved), got %s, %v", s.Phase().APIStatus(), e)
 	}
 	if s.Outcome != OutcomeCompleted {
 		t.Errorf("the instrument's completed outcome must be kept, got %q", s.Outcome)
@@ -197,7 +199,7 @@ func TestEvidenceOrderDoesNotMatter(t *testing.T) {
 		facts []Fact
 		phase Phase
 	}{
-		{"lost, no copy", []Fact{claimed, ran(OutcomeCompleted, "X"), lost}, PhaseFailed},
+		{"lost, no copy", []Fact{claimed, ran(OutcomeCompleted, "X"), lost}, PhaseUnresolved},
 		{"lost, matching copy", []Fact{claimed, ran(OutcomeCompleted, "X"), lost, stored("X", t2)}, PhaseCompleted},
 		{"verified then corrupted", []Fact{claimed, ran(OutcomeCompleted, "X"), stored("X", t2), stored("Y", t3)}, PhaseCompleted},
 	} {

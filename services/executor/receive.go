@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"time"
 
@@ -187,6 +188,65 @@ func eventFact(ev protocol.Event) Fact {
 		return DataLost{JobID: ev.JobID}
 	}
 	return nil
+}
+
+// recheckEvery is how often storage is searched again for reads reported lost.
+var recheckEvery = 10 * time.Second
+
+// recheckLoop looks in storage for the data of each read reported lost (D3). An
+// upload sent before the driver lost the bytes may land at any time, and no
+// driver is left to report it, so the executor looks itself.
+func (e *Executor) recheckLoop(ctx context.Context) {
+	defer e.wg.Done()
+	tick := time.NewTicker(recheckEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			e.recheckLost(ctx)
+		}
+	}
+}
+
+func (e *Executor) recheckLost(ctx context.Context) {
+	if e.storage == nil {
+		return
+	}
+	rows, err := e.db.QueryContext(ctx,
+		`SELECT job_id, device_id, lifecycle FROM steps WHERE phase = $1 AND lifecycle->>'DataLost' = 'true'`, PhaseUnresolved)
+	if err != nil {
+		log.Printf("executor: list reads reported lost: %v", err)
+		return
+	}
+	type lost struct {
+		job, device string
+		step        Step
+	}
+	var reads []lost
+	for rows.Next() {
+		var l lost
+		var raw []byte
+		if rows.Scan(&l.job, &l.device, &raw) == nil && json.Unmarshal(raw, &l.step) == nil {
+			reads = append(reads, l)
+		}
+	}
+	rows.Close()
+	for _, l := range reads {
+		ds, err := e.readBack(ctx, l.job)
+		if err != nil {
+			continue // still absent, or storage is not answering: nothing new
+		}
+		if slices.ContainsFunc(l.step.Checks, func(c StorageCheck) bool { return c.SHA == ds.SHA }) {
+			continue // the same object as last time
+		}
+		if _, changed, err := e.applyToJob(ctx, l.device, l.job, ds); err != nil {
+			log.Printf("executor: recheck of %s: %v", l.job, err)
+		} else if changed {
+			e.poke()
+		}
+	}
 }
 
 // readBack reads the job's object from storage and records what it holds. The

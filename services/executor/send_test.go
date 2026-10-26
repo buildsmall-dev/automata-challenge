@@ -36,13 +36,16 @@ type fakeDriver struct {
 	cmds    map[string]int       // job -> commands received
 	running bool                 // one job at a time, like the instrument
 	at      map[string]time.Time // job -> ledger finished_at
+	sha     map[string]string    // step -> ledger data_sha256
+	lose    map[string]bool      // step -> report its data lost after finishing
 	sub     *nats.Subscription
 }
 
 func newFakeDriver(t *testing.T, nc *nats.Conn, device string) *fakeDriver {
 	js, _ := jetstream.New(nc)
 	d := &fakeDriver{t: t, nc: nc, js: js, device: device,
-		outcome: map[string]string{}, ledger: map[string]int{}, cmds: map[string]int{}, at: map[string]time.Time{}}
+		outcome: map[string]string{}, ledger: map[string]int{}, cmds: map[string]int{}, at: map[string]time.Time{},
+		sha: map[string]string{}, lose: map[string]bool{}}
 	return d
 }
 
@@ -106,14 +109,17 @@ func (d *fakeDriver) execute(cmd protocol.RunCommand) {
 	start := time.Now().UTC()
 	end := start.Add(10 * time.Millisecond)
 	d.mu.Lock()
-	outcome := d.outcome[cmd.Step]
+	outcome, sha, lose := d.outcome[cmd.Step], d.sha[cmd.Step], d.lose[cmd.Step]
 	d.at[cmd.JobID] = end
 	d.mu.Unlock()
 	if outcome == "" {
 		outcome = "completed"
 	}
 	d.publish(protocol.Event{Kind: protocol.KindStarted, JobID: cmd.JobID, StartedAt: &start})
-	d.publish(protocol.Event{Kind: protocol.KindFinished, JobID: cmd.JobID, Outcome: outcome, StartedAt: &start, FinishedAt: &end})
+	d.publish(protocol.Event{Kind: protocol.KindFinished, JobID: cmd.JobID, Outcome: outcome, StartedAt: &start, FinishedAt: &end, SHA: sha})
+	if lose {
+		d.publish(protocol.Event{Kind: protocol.KindDataLost, JobID: cmd.JobID})
+	}
 }
 
 func (d *fakeDriver) publish(ev protocol.Event) {

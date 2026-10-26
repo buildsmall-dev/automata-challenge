@@ -116,3 +116,48 @@ func TestStoredElsewhereIsDropped(t *testing.T) {
 		t.Errorf("after a stored event with a foreign ref: %s, data_ref %v", sv.Status, sv.DataRef)
 	}
 }
+
+// A driver reports a read's data lost, but an upload it sent before it died may
+// still land (D3). The run must not be finished as failed while that is
+// possible; when the object does appear, the executor finds it itself (no
+// driver is left to report it) and the read and the run complete.
+func TestLostDataKeepsTheRunOpenUntilStorageSettlesIt(t *testing.T) {
+	recheck(t, 200*time.Millisecond)
+	h := newHarness(t, testStorage(t))
+	h.drivers()
+	pr := newFakeDriver(t, h.nc, "plate-reader-1").serve()
+	data := []byte("measured, uploaded late")
+	pr.sha["read_plate"], pr.lose["read_plate"] = digest(data), true
+	rv := h.startRun(testWorkflow)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		sv := stepView(t, h.e, rv.ID, "read_plate")
+		if sv.Error != nil && strings.Contains(*sv.Error, "lost") {
+			if sv.Status != StepRunning {
+				t.Fatalf("read reported lost is %s, want running (unresolved)", sv.Status)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("data_lost never recorded: %+v", sv)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	time.Sleep(time.Second)
+	if got, _ := h.e.GetRun(context.Background(), rv.ID); got.Status != RunRunning {
+		t.Fatalf("run finished as %s while the read's outcome is uncertain", got.Status)
+	}
+
+	h.put(protocol.JobID(rv.ID, "read_plate", 1), data) // the late upload lands
+	done := h.waitRun(rv.ID, RunCompleted, 5*time.Second)
+	if s := done.Steps[1]; s.Status != StepCompleted || s.DataRef == nil || s.Error != nil {
+		t.Errorf("read after the late upload: %+v", s)
+	}
+}
+
+func recheck(t *testing.T, every time.Duration) {
+	old := recheckEvery
+	recheckEvery = every
+	t.Cleanup(func() { recheckEvery = old })
+}

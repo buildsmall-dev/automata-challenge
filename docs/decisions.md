@@ -82,7 +82,8 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
   `completed` and `data_ref` stays set. The newest mismatching read-back is reported in
   `error` ("stored data no longer matches what the instrument measured (checked T)") and
   cleared by a newer matching one. Before verification, a mismatch leaves the step
-  unresolved; with `DataLost` (the driver no longer has the bytes) it is failed.
+  unresolved; with `DataLost` (the driver no longer has the bytes) it was failed, until
+  D3 changed that to unresolved.
 - **Alternatives:** move the step back to unresolved (API running): the record stays true
   but a status regresses, and dependents may already have run. Ignore checks after
   completion: hides corruption.
@@ -91,3 +92,28 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
 - **Would revisit if:** we need data integrity as its own field (GraphQL could expose it
   instead of overloading `error`).
 - **Slice / PR:** S1, step lifecycle.
+
+## D3. A read reported lost stays unresolved; only storage, or a decision, settles it
+
+- **Question:** a restarted driver reports `data_lost` when storage has no object for a
+  read its ledger completed. Is that enough to fail the read, and finish the run as failed?
+- **Chosen:** no. `DataLost` makes the read **unresolved** (API `running`, `error` says the
+  data was lost but an earlier upload may still appear), so its run is never finished while
+  the outcome is open. The executor looks in storage for each such read every 10s
+  (`recheckLoop`); a matching object completes it (late facts win), as if `stored` had
+  arrived. Ending it any other way is an explicit decision, not a timeout: re-run the read
+  (hang/retry `/decide`) or an operator declares it lost (K6).
+- **Alternatives:** fail after a grace period (R1 first did this, with 2 x the storage
+  timeout): a delayed upload can still land later, and then the record contradicts
+  storage (user review of R1). Let storage arbitrate with create-only writes
+  (`If-None-Match: *`), tombstone the key before declaring loss: would make "lost" a fact,
+  but **measured**: SeaweedFS 3.62 ignores the header (a second conditional PUT returned
+  200 and overwrote). Fence late uploads with a per-process key: the data would still be in
+  storage, so "lost" would still be false.
+- **Rests on:** no bound on when a dead client's upload can land (**inferred**: nothing in
+  S3 or SeaweedFS promises one). The driver keeps its grace period only to avoid a needless
+  `data_lost`, not for correctness.
+- **Would revisit if:** storage supports conditional writes (newer SeaweedFS, real S3:
+  then tombstone-and-arbitrate, and lost becomes final); or runs must end on their own
+  (then a retry policy ends them, not a guess).
+- **Slice / PR:** R1 (PR #11), after review.

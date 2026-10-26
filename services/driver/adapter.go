@@ -22,8 +22,9 @@ const (
 )
 
 // uploadGrace: an upload the last process sent just before it died can still
-// land after this one starts. Absence is only believed once this long has
-// passed since start, longer than any of its requests could have lasted.
+// land after this one starts, so absence is only reported once this long has
+// passed since start. It saves a needless data_lost, nothing more: a later
+// upload is still possible, and the executor keeps looking for it (D3).
 var uploadGrace = 2 * storage.RequestTimeout
 
 // Serve is the driver side of the work. This file is yours.
@@ -163,8 +164,9 @@ func (d *driver) replay(ctx context.Context, ledger []instrument.Execution) {
 
 // recoverData says what became of a read whose bytes this process never had:
 // stored if the object is there, data_lost if storage still says it is not
-// once uploadGrace has passed. Storage not answering says neither, so it is
-// asked again.
+// once uploadGrace has passed. data_lost means "this driver cannot store it",
+// not "it will never be stored" (D3). Storage not answering says neither, so it
+// is asked again.
 func (d *driver) recoverData(ctx context.Context, jobID string) {
 	if d.st == nil {
 		return
@@ -182,7 +184,7 @@ func (d *driver) recoverData(ctx context.Context, jobID string) {
 		case time.Now().Before(d.believeAbsent):
 			sleep(ctx, time.Until(d.believeAbsent)) // then ask once more
 		default:
-			log.Printf("driver %s: data of %s was never stored and is gone", d.device, jobID)
+			log.Printf("driver %s: data of %s is not in storage and this process never had it; reporting it lost", d.device, jobID)
 			d.publish(ctx, protocol.Event{Kind: protocol.KindDataLost, JobID: jobID})
 			return
 		}

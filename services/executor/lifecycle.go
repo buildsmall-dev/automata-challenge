@@ -172,11 +172,8 @@ func (s Step) Phase() Phase {
 	case OutcomeFailed:
 		return PhaseFailed
 	case OutcomeCompleted:
-		switch {
-		case !s.ProducesData, s.verified():
+		if !s.ProducesData || s.verified() {
 			return PhaseCompleted
-		case s.DataLost:
-			return PhaseFailed
 		}
 		return PhaseStoring
 	}
@@ -203,22 +200,22 @@ func (s Step) Reason() string {
 		return "instrument hung; outcome unknown"
 	case read && s.LedgerSHA == "":
 		return "instrument reported no digest for its data"
-	case read && len(s.Checks) > 0 && !s.verified() && !s.DataLost:
+	case read && s.DataLost && !s.verified():
+		// Not failed: an upload sent before the driver lost the bytes can still
+		// land, and storage cannot refuse it (D3). Only storage showing the data,
+		// or a decision, settles it.
+		msg := "driver lost the data before it was confirmed stored; an earlier upload may still appear in storage"
+		if len(s.Checks) > 0 {
+			msg += "; the stored object does not match what the instrument measured"
+		}
+		return msg
+	case read && len(s.Checks) > 0 && !s.verified():
 		return "stored data does not match what the instrument measured"
 	}
 	return ""
 }
 
-func (s Step) failure() string {
-	if s.Outcome == OutcomeFailed {
-		return s.InstrumentError
-	}
-	msg := "instrument completed the read, but its data was lost before storage"
-	if len(s.Checks) > 0 {
-		msg += "; the stored object does not match what it measured"
-	}
-	return msg
-}
+func (s Step) failure() string { return s.InstrumentError }
 
 // warning: a verified completion is never undone, but a later read-back that
 // no longer matches is reported.
