@@ -76,3 +76,99 @@ One entry per experiment, newest last. Feeds NOTES.md §4–5.
   record can only hold the question open and keep looking.
 - **Follow-up:** D3, R1 (PR #11). Ending such a read is a decision: retry policy or
   operator "declare lost" (K39, K6).
+
+## C3. Hang faults on every device under D4 (retry policy)
+
+- **Setup:** `dev` at `91f31c9` (D4 complete: attempts, store lookup, policy). Executor policy
+  defaults: `REPEAT_SAFE=plate-reader`, `REREAD_ON_DATA_LOSS=plate-reader`, `MAX_ATTEMPTS=3`.
+  `LH_HANG_PCT=INC_HANG_PCT=PR_HANG_PCT=30`, all `*_FAIL_PCT=0`, `HANG_DURATION=30s`.
+  - **C3a:** `CHAOS_SEED=0`, one PCR Amplification run, then one Triple Assay run.
+  - **C3b:** `CHAOS_SEED=17`, one Triple Assay run. This seed was chosen from the roll table so
+    that only `plate_read` hangs on its first attempt, to exercise the one retry D4 allows
+    for a hang.
+- **Command:** `CHAOS_SEED=<seed> LH_HANG_PCT=30 INC_HANG_PCT=30 PR_HANG_PCT=30 docker compose up -d
+  liquid-handler-1 incubator-1 plate-reader-1`, then `POST /runs {"workflow_name": ...}` and
+  `POST /runs/<id>/start`. Wait until the run is terminal or 150s pass.
+- **Roll table** (computed with `instrument.go`'s `roll`; the instrument's attempt counter is our
+  attempt − 1; HANG if roll < 30):
+
+  | seed | step | device | attempt 1 / 2 / 3 |
+  |---|---|---|---|
+  | 0 | fill_sample_plate | liquid-handler-1 | 13 HANG / 19 HANG / 52 |
+  | 0 | incubate_samples, fill_buffer_plate, warm_reagent_plate, combine, read_plate | — | first attempt ok |
+  | 0 | fill_reagent_plate | liquid-handler-1 | 22 HANG / 65 / 20 HANG |
+  | 0 | prepare, pipette, plate_read, report | — | first attempt ok |
+  | 0 | incubate | incubator-1 | 26 HANG / 7 HANG / 93 |
+  | 17 | prepare, pipette, incubate, report | — | first attempt ok |
+  | 17 | plate_read | plate-reader-1 | 26 HANG / 83 / 91 |
+
+- **Predicted** (written before running):
+  - **C3a, PCR:**
+    - The liquid handler's ledger has exactly one execution for the run: `fill_sample_plate/1`,
+      `hung`, about 30s long.
+    - The record has `fill_sample_plate` `failed`, "instrument hung; outcome unknown; not
+      repeated: liquid-handler-1 is not safe to repeat", with the ledger's times. During the
+      hang it is `running` with no error.
+    - The other six steps are `pending` and never commanded; no other ledger has an execution
+      for this run.
+    - The run is `failed`, with `finished_at` the hung execution's ledger `finished_at`.
+    - Path: driver `waitLedger` → `finished(hung)` → lifecycle `ended` → `Policy.next` gives up →
+      `finish`.
+  - **C3a, Triple Assay:**
+    - `prepare`, `pipette` and `plate_read` are `completed`; `plate_read`'s object exists and its
+      sha256 equals the ledger's.
+    - `incubate` is `failed`, "…; not repeated: incubator-1 is not safe to repeat"; its ledger
+      has `incubate/1` `hung`.
+    - `report` is `pending` and never commanded. The run is `failed`. No `/2` job on any device.
+  - **C3b, Triple Assay:**
+    - The plate reader's ledger has `plate_read/1` `hung`, then `plate_read/2` `completed`
+      (started about 30s later, once the hang is reported), then `report/1` `completed`.
+    - The record has `plate_read` `completed` with `data_ref` `runs/<run>/plate_read/2.csv`,
+      the object's sha256 equal to attempt 2's `data_sha256`, and attempt 2's ledger times.
+    - The run is `completed`.
+    - `acceptance.sh`'s check 5 would call this a step that ran twice (K52); it isn't run here.
+- **Observed** (measured; ledger times in seconds past 01:2x UTC, 2026-10-27):
+  - **C3a PCR, `run-e3abbca2ff3a`:**
+    - Ledger: `fill_sample_plate/1` `hung`, from 21:48.5345 to 22:18.5367 (30.0s). Nothing
+      else on any device.
+    - Record: `fill_sample_plate` `failed`, "instrument hung; outcome unknown; not repeated:
+      liquid-handler-1 is not safe to repeat", with the same two times. It was `running`
+      with no error at every 5s poll during the hang. Six steps `pending`.
+    - Run `failed`, `finished_at` 22:18.536736, the ledger's.
+  - **C3a Triple Assay, `run-899fe8ab6674`:**
+    - Ledger: `prepare/1`, `pipette/1`, `plate_read/1` `completed`; `incubate/1` `hung`
+      (22:38.4810 to 23:08.4867).
+    - Record: the three `completed`; `incubate` `failed`, "…; not repeated: incubator-1 is not
+      safe to repeat"; `report` `pending`; run `failed`.
+    - `plate_read/1.csv` sha256 `4c7294…c8f9` = ledger `data_sha256`.
+  - **C3b Triple Assay, `run-21f4165a5d5c`:**
+    - Ledger (plate reader): `plate_read/1` `hung` from 23:37.4677 to 24:07.4690; then
+      `plate_read/2` `completed`, starting at 24:07.5000 (31ms after the hang was recorded)
+      and ending at 24:09.5020; then `report/1` `completed`.
+    - Record: every step `completed`, run `completed`. `plate_read` has `data_ref`
+      `…/plate_read/2.csv` and attempt 2's times; the lifecycle keeps both attempts, with
+      `Decided: 2`.
+    - Storage: `plate_read/2.csv` sha256 `276b13…bcb5` = attempt 2's ledger sha; there is no
+      `plate_read/1.csv` (404); `report/1.csv` `c65fa9…3a9e` = its ledger sha.
+    - Executor logs: no errors and no unknown jobs.
+- **Record true?** Yes, in all three runs:
+  - Every status, outcome and time agrees with a ledger entry.
+  - Every `completed` read is backed by an object whose hash matches its ledger.
+  - No step claimed success over a `hung` entry, and nothing was stuck.
+- **Understanding:**
+  - **Every prediction held.** The fault roll is deterministic and has no run id, so the
+    policy's outcome for a seed can be read off the table before running. At seed 0, every
+    PCR run with `LH_HANG_PCT` above 13 fails at its first step, by design: the liquid handler
+    isn't safe to repeat.
+  - **Missed in the prediction:** `report` is also a plate-reader step, so it stores data too.
+    It was handled correctly.
+  - **A retry costs a full `HANG_DURATION`.** It waits for the instrument's own `hung` (no
+    timer, D4), then goes at once (31ms measured). C3b took 36s instead of about 6s.
+  - **New gap:** with retries, the REST step and `/timeline` show only the attempt that decided
+    the step. `plate_read`'s `started_at` is 24:07.5, and the timeline puts it at offsets
+    32.1s–34.1s. Every time shown is a true ledger time. But the plate reader was also
+    occupied by `plate_read/1` from offset 2.0s to 32.0s, and neither shows that. The record
+    isn't false, but it's incomplete about when the device was busy (K53).
+- **Follow-up:** no fix slice; the record was true. K53 goes to GraphQL (an attempts history
+  per step) and possibly the timeline. K52 (acceptance check 5 against retried steps) still
+  stands; acceptance wasn't run with faults on.
