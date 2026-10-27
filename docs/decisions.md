@@ -159,3 +159,100 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
   then tombstone-and-arbitrate, and lost becomes final); or runs must end on their own
   (then a retry policy ends them, not a guess).
 - **Slice / PR:** R1 (PR #11), after review.
+
+## D4. Retry per cause and per device, bounded; a step is decided by all its attempts
+
+- **Question:** what ends a step that cannot succeed as it stands (a retryable failure, a hang,
+  a read whose data was lost), and when to start a new attempt. Today a hung or lost step stays
+  `running` forever, and a retryable failure fails the run. A careless retry can repeat liquid
+  handling physically.
+- **Chosen:** option B, automatic and bounded, with a trigger per cause:
+  - **A new attempt needs a positive claim that repeating is safe, from the source for its
+    cause; no claim, no retry.** The sources: the instrument's `Retryable` (failure), the
+    device's `repeat_safe` (hang), the device's `reread_on_data_loss` (data lost).
+  - **Retryable failure:** a new attempt at once. The driver forwards the instrument's
+    `Retryable` in `finished` (it is not in the ledger). A `finished(failed)` without the
+    flag, as replay sends after a driver restart (R1), is not retried: the step is `failed`.
+    So the same physical failure can end differently around a restart, always on the side of
+    not repeating.
+  - **Hung:** a new attempt after `finished(hung)`, only on a `repeat_safe` device. Otherwise
+    the step is `failed`: "instrument hung; outcome unknown; not repeated". There is no timer:
+    the retry waits for the instrument's own report that it gave up, so it never goes to a
+    frozen instrument.
+  - **Data lost:** a re-read at once, alongside the still-open attempt (D3), on a device with
+    `reread_on_data_loss`. Don't wait for the late upload; D3 found no limit on that wait.
+  - At most 3 attempts per step, shared by all causes.
+  - **Cancel, as D1 has it, applied to attempts:**
+    - A cancel is our intent on the step, recorded whatever state the step is in: no new
+      attempt is dispatched after it. Retry and cancel both take the step's row lock, so
+      one of them is first, as claim and cancel are in D1.
+    - An attempt dispatched but not claimed is cancelled; exactly one of claim and cancel
+      wins (D1). An attempt already claimed is not stopped: it may be running, so only its
+      evidence says how it ended, and its late facts are still recorded (D1, "late facts
+      always win").
+    - The step is `cancelled` only if no attempt was ever claimed. Otherwise it is decided
+      by its attempts, as below, with the cancel being one reason no further attempt will
+      be made (`failed`: "…; not retried: cancelled"). A cancel never hides a physical
+      attempt, and never undoes a completion (D2).
+    - A read whose data was lost when the cancel came is not re-read. Its attempt stays
+      open until its upload appears (D3).
+  - **A step is decided by all its attempts:** `completed` once any attempt is verified
+    complete (the first verified one supplies `data_ref` and the times, D2); `failed` only when
+    every attempt is finished, none completed, and no further attempt will be made; otherwise
+    `running`. An attempt that is still open does not hold its run back once another attempt
+    of the same step has completed.
+  - Every attempt is kept (fixes K2). Facts for older attempts find their step by parsing the
+    job id (`run/step/attempt`). REST shows the attempt that decided the step, or the latest
+    if none has; GraphQL shows the history.
+  - **Defaults:** repeat-safe = plate reader only; re-read on data loss = plate reader;
+    3 attempts in total. The incubator is not repeat-safe: a hung incubation ran for an
+    unknown part of its time, and repeating it adds an unknown amount of incubation to the
+    same plate, whereas a second read leaves the plate unchanged. The incubator still retries a
+    failure the instrument marks retryable. Cost (measured roll): at `INC_HANG_PCT=30`,
+    seed 0, Triple Assay's `incubate` hangs on attempt 1, so every such run ends `failed`
+    ("outcome unknown; not repeated"), the same trade as the liquid handler.
+  - **Deferred:** an operator `abandonStep(run, step)` (GraphQL) for the one case the policy
+    leaves open: a lost read whose re-reads also failed or lost their data stays `running`
+    (K39). It would set `failed`, "abandoned by operator; a late upload may still appear",
+    and only while the step is `running` with no verified attempt (D2); a late upload is still
+    recorded in the attempt history. Recorded here, built with GraphQL if time allows.
+- **Alternatives:**
+  - *A, an operator decides (GraphQL `retryStep` / `abandonStep`):* never repeats anything by
+    itself, but under any fault seed runs never end on their own (measured, below).
+  - *C, the instrument's `Retryable` flag only:* a hang returns no flag, so C can't decide the
+    hardest case. It becomes A for hangs, or an unsafe B (repeated dispensing).
+  - *First draft of B (explainer v1):* one trigger for all three causes, and "a step is its
+    latest attempt". Wrong for lost data: the first attempt is still open, so a failing re-read
+    would have marked the step `failed` while its upload could still land (user review).
+  - *A final hang left `running` until an operator acts:* `running` claims something is still
+    happening after the instrument has stopped. CLAUDE.md: `failed` with the reason once we
+    can't find out.
+  - *Incubator repeat-safe (first recording):* Triple Assay would finish under hang faults,
+    but by incubating a plate twice for an unknown total time (user review).
+  - *A cancelled step shown `cancelled` whatever its attempts did:* would hide a physical
+    attempt that ran, against D1's "a cancel stops what has not started".
+- **Rests on:**
+  - **measured:** the fault roll is `sha256(seed:device:step:attempt)`, with no run id, so
+    under one seed a step's first attempt has the same fate in every run; only a retry rolls
+    again (`incubate` hangs on attempts 1 and 2 at 30%, seed 0).
+  - **inferred:** after the ledger says `hung`, nothing more is learned
+    (`instrument.go:192-199`).
+  - **inferred:** `FAILURES_RETRYABLE` is false for the liquid handler, true for the others.
+  - **inferred:** `Retryable` exists only in `Run`'s return (`instrument.go:211`); the ledger,
+    which replay reads, does not have it.
+  - **inferred:** a hung job is reported once the instrument frees itself after
+    `HANG_DURATION`, because the driver reads the ledger, not `Run`'s return
+    (`instrument.go:198-203`, `adapter.go:41`).
+  - **guess:** which operations are safe to repeat on real equipment, and whether a later
+    re-read is an acceptable substitute. Hence both are settings per device, not code.
+- **Would revisit if:** repeat-safety can't be stated honestly per device (then A); acceptance
+  check 5 must hold with faults on (then A); storage gains conditional writes (a lost read
+  becomes final under D3, and is retried like a hang).
+- **Known limits:** a step whose re-reads all fail after a data loss stays `running` (K39,
+  narrower; operator abandon deferred, above); a retry fails acceptance check 5 under faults
+  (K5); a re-read is a different measurement, taken later; what a run's own status is after a
+  cancel is left to the cancel slice (K42).
+  Explainers: `tmp/d4-hang-retry.html` (v1), `tmp/d4-hang-retry-v2.html`.
+- **Slice / PR:** this PR records it. Slices follow: protocol (`retryable`), lifecycle
+  (attempts, the all-attempts rule), store (lookup by job id), policy (config, retries), then
+  a `/break` run with hang faults.
