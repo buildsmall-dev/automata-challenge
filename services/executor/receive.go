@@ -183,7 +183,7 @@ func eventFact(ev protocol.Event) Fact {
 		return Started{JobID: ev.JobID, At: *ev.StartedAt}
 	case protocol.KindFinished:
 		return Finished{JobID: ev.JobID, Outcome: Outcome(ev.Outcome), StartedAt: *ev.StartedAt,
-			FinishedAt: *ev.FinishedAt, Error: ev.Error, SHA: ev.SHA}
+			FinishedAt: *ev.FinishedAt, Error: ev.Error, SHA: ev.SHA, Retryable: ev.Retryable}
 	case protocol.KindDataLost:
 		return DataLost{JobID: ev.JobID}
 	}

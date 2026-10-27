@@ -53,6 +53,7 @@ type Step struct {
 	FinishedAt      *time.Time
 	Outcome         Outcome // empty until the ledger says how it ended
 	InstrumentError string
+	Retryable       bool           // the instrument said the failure may be repeated (D4)
 	LedgerSHA       string         // what the instrument says it measured
 	Checks          []StorageCheck // every time we read the data back from storage
 	DataLost        bool           // the driver no longer has the bytes to store
@@ -84,6 +85,7 @@ type Finished struct {
 	FinishedAt time.Time
 	Error      string
 	SHA        string // ledger data_sha256, for instruments that produce data
+	Retryable  bool   // the instrument said this failure may be repeated (D4)
 }
 type DataStored struct {
 	JobID string
@@ -131,6 +133,7 @@ func Apply(s Step, f Fact) (Step, bool) {
 		if s.Outcome == "" {
 			s.Outcome, s.InstrumentError, s.LedgerSHA = f.Outcome, f.Error, f.SHA
 			s.StartedAt, s.FinishedAt = &f.StartedAt, &f.FinishedAt
+			s.Retryable = f.Retryable && f.Outcome == OutcomeFailed
 		} else if (f.Outcome != s.Outcome || f.SHA != s.LedgerSHA) && s.Conflict == "" {
 			s.Conflict = fmt.Sprintf("conflicting outcomes reported for %s: %s, then %s", f.JobID, s.Outcome, f.Outcome)
 		}

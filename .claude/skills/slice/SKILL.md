@@ -27,7 +27,7 @@ and say so before starting.
 4. **Smallest change that passes.** No speculative abstractions. No hardening beyond
    this slice's behaviour. Note anything deferred.
 
-5. **Verify.** `go build ./... && go vet ./... && go test ./...`, plus the slice's
+5. **Verify.** `go build ./... && go vet ./... && go test -race ./...`, plus the slice's
    own check. If the slice touches the running system, rebuild the stack and run
    `./scripts/acceptance.sh`. Report results as measured, with output.
 

@@ -289,3 +289,28 @@ func TestEventsWaitForTheExecutor(t *testing.T) {
 	h.e = again
 	h.waitStep(rv.ID, "fill", StepCompleted)
 }
+
+// The step keeps what the instrument said about repeating a failure (D4).
+func TestFinishedKeepsRetryable(t *testing.T) {
+	h := newHarness(t)
+	rv := newRun(t, h.e)
+	job := h.dispatch(rv, "fill")
+	h.claim(job)
+	at := time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
+	ev := finished(job, at)
+	ev.Outcome, ev.Error, ev.Retryable = "failed", "instrument error during fill", true
+	h.event("liquid-handler-1", ev)
+	h.waitStep(rv.ID, "fill", StepFailed)
+
+	var s Step
+	var raw []byte
+	if err := h.e.db.QueryRow(`SELECT lifecycle FROM steps WHERE job_id = $1`, job).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &s); err != nil {
+		t.Fatal(err)
+	}
+	if !s.Retryable {
+		t.Errorf("step after a retryable failure = %+v, want Retryable", s)
+	}
+}

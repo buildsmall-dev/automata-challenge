@@ -566,3 +566,34 @@ func TestReplayReportsOutcomesWhileStorageIsDown(t *testing.T) {
 		t.Fatalf("events = %v, want finished for both jobs", kinds(es))
 	}
 }
+
+// Whether a failure may be repeated is known only from Run's return, not the
+// ledger (D4), so the finished event carries what the instrument said.
+func TestFailedJobForwardsRetryable(t *testing.T) {
+	for _, retryable := range []bool{true, false} {
+		r := newRig(t, instrument.Config{FailPct: 100, FailuresRetryable: retryable}, true)
+		r.claimer(protocol.ClaimGo)
+		r.send(protocol.NewRunCommand("run-1", "fill", 1))
+		es := r.events(2, 3*time.Second)
+		if len(es) != 2 || es[1].Outcome != instrument.OutcomeFailed || es[1].Retryable != retryable {
+			t.Errorf("FailuresRetryable=%v: events = %+v, want finished failed with retryable=%v", retryable, es, retryable)
+		}
+	}
+}
+
+// After a restart the flag is gone with the process that heard it. Replay says
+// only what the ledger says, so a replayed failure is not retryable (D4).
+func TestReplayedFailureIsNotRetryable(t *testing.T) {
+	job := uniqueRun() + "/fill/1"
+	cfg := before(t, instrument.Config{FailPct: 100, FailuresRetryable: true}, func(in *instrument.Instrument) {
+		if out := runJob(t, in, job); !out.Retryable {
+			t.Fatalf("instrument said %+v, want a retryable failure", out)
+		}
+	})
+	r := newRig(t, cfg, true)
+	es := r.events(2, 3*time.Second)
+	fin := eventFor(es, job, protocol.KindFinished)
+	if fin == nil || fin.Outcome != instrument.OutcomeFailed || fin.Retryable {
+		t.Fatalf("replayed finished = %+v, want failed and not retryable", fin)
+	}
+}
