@@ -274,24 +274,59 @@ executor answering claims in order (§5).
 
 ## 3. GraphQL schema
 
-`POST /graphql` on port 5002, alongside the unchanged REST API. The full schema, with field
-descriptions, is in `services/executor/graphql.go`:
+`POST /graphql` on port 5002, alongside the unchanged REST API. This is the schema in
+`services/executor/graphql.go` without its field descriptions. It is valid SDL, and parses to
+the same types, fields and enum values:
 
 ```graphql
-type Query    { run(id: ID!): Run   runs(status: RunStatus): [Run!]!   workflows: [Workflow!]! }
-type Mutation { createRun(workflowName: String): Run!   startRun(id: ID!): Run!   cancelRun(id: ID!): Run! }
+scalar Time
 
-type Run  { id workflowName status createdAt startedAt finishedAt
-            cancelRequested: Boolean!   steps: [Step!]! }
-type Step { name device dependsOn status startedAt finishedAt error dataRef   # exactly as REST
-            phase: StepPhase!           # DISPATCHED CLAIMED RUNNING STORING UNRESOLVED ENDED …
-            attempts: [Attempt!]! }
-type Attempt { number jobId phase decided claimed
-               outcome startedAt finishedAt          # the ledger's, for this attempt
-               instrumentError retryable unresolved
-               data: AttemptData }                   # reads only
-type AttemptData  { ledgerSha256 verified dataLost checks: [StorageCheck!]! }
-type StorageCheck { ref sha256 matches at }
+type Query {
+  run(id: ID!): Run                  # null if there is no such run
+  runs(status: RunStatus): [Run!]!   # newest first
+  workflows: [Workflow!]!
+}
+
+type Mutation {
+  createRun(workflowName: String): Run!
+  startRun(id: ID!): Run!
+  cancelRun(id: ID!): Run!           # stops what hasn't started
+}
+
+type Workflow { name: String!  isDefault: Boolean!  steps: [String!]! }
+
+type Run {
+  id: ID!  workflowName: String!  status: RunStatus!
+  cancelRequested: Boolean!          # it may still be running: claimed work isn't stopped
+  createdAt: Time!  startedAt: Time  finishedAt: Time
+  steps: [Step!]!
+}
+
+type Step {
+  name: String!  device: String!  dependsOn: [String!]!
+  status: StepStatus!                # exactly as REST, like the times, error and dataRef
+  phase: StepPhase!                  # finer than status
+  startedAt: Time  finishedAt: Time  error: String  dataRef: String
+  attempts: [Attempt!]!              # every attempt, first first
+}
+
+type Attempt {
+  number: Int!  jobId: ID!  phase: AttemptPhase!
+  decided: Boolean!  claimed: Boolean!
+  outcome: Outcome                   # null until the ledger says
+  startedAt: Time  finishedAt: Time  # this attempt's ledger times
+  instrumentError: String  retryable: Boolean!  unresolved: String
+  data: AttemptData                  # reads only
+}
+
+type AttemptData { ledgerSha256: String  verified: Boolean!  dataLost: Boolean!  checks: [StorageCheck!]! }
+type StorageCheck { ref: String!  sha256: String!  matches: Boolean!  at: Time! }  # at: the executor's clock
+
+enum RunStatus    { PENDING RUNNING COMPLETED FAILED CANCELLED }
+enum StepStatus   { PENDING RUNNING COMPLETED FAILED CANCELLED }
+enum StepPhase    { PENDING DISPATCHED RETRYING CLAIMED RUNNING STORING UNRESOLVED ENDED COMPLETED FAILED CANCELLED }
+enum AttemptPhase { DISPATCHED CLAIMED RUNNING STORING UNRESOLVED COMPLETED FAILED CANCELLED }
+enum Outcome      { COMPLETED FAILED HUNG }
 ```
 
 Errors carry `extensions.code`: `NOT_FOUND`, `BAD_USER_INPUT`, `WORKFLOWS_INVALID` or
@@ -418,6 +453,34 @@ _To be filled in._
 ---
 
 ## AI use
+
+### How we set up the work
+
+Before writing any code, we spent time on `CLAUDE.md` and three project skills in
+`.claude/skills/`. With an AI writing most of the code, the risk is code that looks right and
+makes claims nobody has checked. That is the same failure the run record must avoid. So
+`CLAUDE.md` states the invariant (the record must be true, the ledger is the evidence) and a
+review checklist for every message and state change: what if it arrives twice, late or never,
+or the process restarts halfway? Each skill makes one kind of work produce evidence:
+
+- **`/decide`** was used for the two biggest forks, messaging and retries. It set out two or
+  three real alternatives and the assumption each rests on, and settled facts by experiment
+  where it could, before I chose. C1 came before the messaging design, and measuring that the
+  fault roll ignores the run id came before the retry design. Smaller forks, such as cancel and
+  GraphQL, were argued the same way inside their slices. All are in the decisions log.
+- **`/slice`** kept each change to one behaviour and one PR into `dev`. Each started from a
+  check that failed first, passed `go test -race` and the acceptance script, and was reviewed
+  once by Codex. It ended with an explanation I could check before merging. Reviewing those
+  explanations and decision records is where the reversals below came from.
+- **`/break`** made each experiment start with a written prediction, and end with the record
+  compared against the instrument ledgers and storage, not the API's word. That comparison
+  became `scripts/check-run.py`. Wrong predictions were logged as findings, such as the 30s
+  ack wait in §4.
+
+None of this was about generating code faster. It kept each claim, in the code and in these
+notes, tied to evidence.
+
+### Who did what
 
 - **Claude Code** wrote the code, tests, scripts and documentation, including this note and
   the HTML explainers. It followed `CLAUDE.md` and the `/decide`, `/slice` and `/break`
