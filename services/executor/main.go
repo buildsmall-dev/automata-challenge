@@ -81,9 +81,12 @@ func main() {
 	defer executor.Close()
 
 	api := &API{executor: executor, workflowsPath: workflowsPath}
+	mux := http.NewServeMux()
+	mux.Handle("/", api.Routes())
+	mux.Handle("/graphql", newGraphQL(executor, workflowsPath))
 	srv := &http.Server{
 		Addr:              ":5001",
-		Handler:           api.Routes(),
+		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		IdleTimeout:       60 * time.Second,
