@@ -292,7 +292,8 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
     - A driver asks for a claim only before it runs a job, and only for one its ledger doesn't
       have, so the request itself proves the job never started.
     - S7's resend is what asks again.
-    - It rests on one driver process per instrument (K55).
+    - It rests on one driver process per instrument (K55), and on one executor answering a
+      driver's claims in order (K56).
   - **The run's final status (rule 1),** once nothing is in flight:
     - `completed` if every step completed (the cancel came too late to stop any);
     - `failed` if a step failed on its own (the policy gave up, whether or not there was a
@@ -300,6 +301,10 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
     - `cancelled` otherwise, meaning the cancel is why the rest didn't happen.
     - A step whose retry the cancel prevented is `failed`, "…; not retried: cancelled", and
       counts towards `cancelled`, not `failed`.
+    - **The cancel does not decide an ended step; the policy does** (Codex, cancel slice). It
+      names the cancel only if it would have made another attempt. A failure that was final
+      anyway (not retryable, not safe to repeat, attempts used up) keeps its own reason, so
+      the run is `failed`.
 - **Alternatives:**
   - *Rule 2, `cancelled` whenever a cancel was requested and not every step completed:*
     rejected, because it hides a failure that happened on its own (user review).
