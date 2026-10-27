@@ -215,7 +215,9 @@ func (e *Executor) recheckLost(ctx context.Context) {
 		return
 	}
 	rows, err := e.db.QueryContext(ctx,
-		`SELECT run_id, name, lifecycle FROM steps WHERE phase = $1`, PhaseUnresolved)
+		// Every step still running, not only unresolved ones: a lost read stays
+		// open while its re-read is in flight, and its upload may land then.
+		`SELECT run_id, name, lifecycle FROM steps WHERE status = $1`, StepRunning)
 	if err != nil {
 		log.Printf("executor: list reads reported lost: %v", err)
 		return

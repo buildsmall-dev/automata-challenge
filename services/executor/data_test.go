@@ -161,3 +161,30 @@ func recheck(t *testing.T, every time.Duration) {
 	recheckEvery = every
 	t.Cleanup(func() { recheckEvery = old })
 }
+
+// The late upload of a lost read is looked for while its re-read is in flight
+// too: here the re-read is claimed and never starts, and attempt 1's object,
+// when it lands, completes the step and the run (D3, D4).
+func TestLostReadIsFoundWhileItsReReadIsStuck(t *testing.T) {
+	recheck(t, 200*time.Millisecond)
+	h := newHarness(t, testStorage(t))
+	h.drivers()
+	pr := newFakeDriver(t, h.nc, "plate-reader-1").serve()
+	data := []byte("measured, uploaded late " + randomHex(4))
+	rv := h.startRun(testWorkflow)
+	first, second := protocol.JobID(rv.ID, "read_plate", 1), protocol.JobID(rv.ID, "read_plate", 2)
+	pr.mu.Lock()
+	pr.sha["read_plate"], pr.lose[first], pr.stall[second] = digest(data), true, true
+	pr.mu.Unlock()
+
+	for deadline := time.Now().Add(5 * time.Second); phaseOf(t, h.e, rv.ID, "read_plate") != PhaseClaimed; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("re-read never claimed: read_plate is %s", phaseOf(t, h.e, rv.ID, "read_plate"))
+		}
+	}
+	h.put(first, data) // attempt 1's upload lands while attempt 2 is stuck
+	done := h.waitRun(rv.ID, RunCompleted, 5*time.Second)
+	if s := done.Steps[1]; s.DataRef == nil || !strings.HasSuffix(*s.DataRef, protocol.DataKey(first)) {
+		t.Errorf("read_plate: %+v, want completed from attempt 1's object", s)
+	}
+}

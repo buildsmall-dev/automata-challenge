@@ -17,7 +17,14 @@ var ErrUnknownJob = errors.New("unknown job")
 // applyToStep applies a fact to the step of a run named name. For intent we
 // issue ourselves (dispatch, cancel) and our own read-backs of storage.
 func (e *Executor) applyToStep(ctx context.Context, runID, name string, f Fact) (Step, bool, error) {
-	return e.apply(ctx, `run_id = $1 AND name = $2`, []any{runID, name}, "", f)
+	return e.apply(ctx, `run_id = $1 AND name = $2`, []any{runID, name}, "", func(Step) Fact { return f })
+}
+
+// decideStep applies to the step of a run named name whatever choose picks
+// from the step as it is under the row lock (nil: nothing), so a decision is
+// never taken on a step that has changed since it was read.
+func (e *Executor) decideStep(ctx context.Context, runID, name string, choose func(Step) Fact) (Step, bool, error) {
+	return e.apply(ctx, `run_id = $1 AND name = $2`, []any{runID, name}, "", choose)
 }
 
 // applyToJob applies a fact to the attempt jobID, if its step is assigned to
@@ -31,14 +38,14 @@ func (e *Executor) applyToJob(ctx context.Context, device, jobID string, f Fact)
 	if !ok {
 		return Step{}, false, fmt.Errorf("%w: %s is not a job id", ErrUnknownJob, jobID)
 	}
-	return e.apply(ctx, `run_id = $1 AND name = $2 AND device_id = $3`, []any{runID, name, device}, jobID, f)
+	return e.apply(ctx, `run_id = $1 AND name = $2 AND device_id = $3`, []any{runID, name, device}, jobID, func(Step) Fact { return f })
 }
 
 // apply is load, Apply, save in one transaction. FOR UPDATE makes a second
 // writer to the same step wait until the first commits and then read its
 // result, so no fact is lost and claim and cancel are ordered. If job is set,
 // the step must have an attempt for it.
-func (e *Executor) apply(ctx context.Context, where string, args []any, job string, f Fact) (Step, bool, error) {
+func (e *Executor) apply(ctx context.Context, where string, args []any, job string, choose func(Step) Fact) (Step, bool, error) {
 	tx, err := e.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Step{}, false, fmt.Errorf("begin: %w", err)
@@ -63,6 +70,10 @@ func (e *Executor) apply(ctx context.Context, where string, args []any, job stri
 		return Step{}, false, fmt.Errorf("%w: %s has no attempt %s", ErrUnknownJob, name, job)
 	}
 
+	f := choose(s)
+	if f == nil {
+		return s, false, nil
+	}
 	s, changed := Apply(s, f)
 	if !changed {
 		return s, false, nil

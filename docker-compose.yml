@@ -69,6 +69,10 @@ services:
       - S3_ENDPOINT=http://storage:8333
       - S3_BUCKET=lab-data
       - WORKFLOWS_FILE=/app/config/workflows.yaml
+      # What may be repeated (D4): device id prefixes, comma-separated; empty means none.
+      - REPEAT_SAFE=${REPEAT_SAFE-plate-reader}
+      - REREAD_ON_DATA_LOSS=${REREAD_ON_DATA_LOSS-plate-reader}
+      - MAX_ATTEMPTS=${MAX_ATTEMPTS:-3}
     volumes:
       # Directory mount, not a single file -- editors that save by rename would
       # silently detach a file mount.

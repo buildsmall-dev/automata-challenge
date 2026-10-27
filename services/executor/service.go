@@ -37,6 +37,7 @@ type Executor struct {
 	db      *sql.DB
 	nc      *nats.Conn
 	storage *storage.Storage
+	policy  Policy // what may be repeated (D4); main sets it from the environment
 
 	claimSub  *nats.Subscription
 	consuming jetstream.ConsumeContext
@@ -51,7 +52,7 @@ type Executor struct {
 }
 
 func NewExecutor(db *sql.DB, nc *nats.Conn, st *storage.Storage) *Executor {
-	return &Executor{db: db, nc: nc, storage: st, wake: make(chan struct{}, 1),
+	return &Executor{db: db, nc: nc, storage: st, policy: defaultPolicy, wake: make(chan struct{}, 1),
 		sending: map[string]bool{}, notBefore: map[string]time.Time{}}
 }
 
