@@ -18,7 +18,7 @@ import (
 	"github.com/automata-tech/distributed-systems-interview/services/common/protocol"
 )
 
-// What the executor hears from the drivers (docs/decisions.md D1): claims, by
+// What the executor hears from the drivers (docs/forengineer/decisions.md D1): claims, by
 // request/reply, and events, from the LAB_EVENTS stream. Each becomes a fact
 // applied in one transaction; the driver is answered, or the event acked, only
 // after that transaction commits (K11).

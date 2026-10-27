@@ -1,6 +1,6 @@
 ---
 name: decide
-description: Work through one design fork in the lab automation challenge with the user (alternatives, assumptions, evidence, recommendation) and record the user's choice in docs/decisions.md. Use when the user says /decide, or when a slice depends on an open design question.
+description: Work through one design fork in the lab automation challenge with the user (alternatives, assumptions, evidence, recommendation) and record the user's choice in docs/forai/decisions.md. Use when the user says /decide, or when a slice depends on an open design question.
 ---
 
 # /decide <question>
@@ -25,5 +25,5 @@ The user makes the decision. Claude's job is to make the choice clear and honest
 4. **Recommend one** and say what would change your mind. Then stop and ask the
    user to choose. Agreeing with the user is not the default.
 
-5. **Record it** in `docs/decisions.md` using the template there, including the
+5. **Record it** in `docs/forai/decisions.md` using the template there, including the
    alternatives rejected and the evidence. Keep it short: it becomes NOTES.md §2.

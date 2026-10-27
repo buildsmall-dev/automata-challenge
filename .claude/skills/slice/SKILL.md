@@ -14,7 +14,7 @@ and say so before starting.
 1. **Frame it.** Before any code, tell the user in a few lines:
    - the behaviour in one sentence, as an observer would see it (API, ledger, S3);
    - the check that proves it: a `go test`, `acceptance.sh`, or a scripted run;
-   - which design decisions it depends on (link `docs/decisions.md` entries).
+   - which design decisions it depends on (link `docs/forai/decisions.md` entries).
      If one is missing, stop and run `/decide` first.
    Wait for the user's OK, unless the slice is mechanical.
 
@@ -37,7 +37,7 @@ and say so before starting.
 7. **Codex review, once.** Commit, then run `./scripts/codex-review.sh` (read-only,
    diffs against `dev`, prints only Codex's verdict; takes about a minute). Triage each finding: fix it, defer it, or reject it with a reason. Do not apply
    fixes silently. Bring only blockers to the user; add non-blocking findings (Claude's
-   and Codex's) to `docs/concerns.md`.
+   and Codex's) to `docs/forai/concerns.md`.
 
 8. **Explain it to the user.** This is the review conversation, so write it to teach:
    - **How it works:** the path a message or request takes, file:line references.
@@ -51,5 +51,5 @@ and say so before starting.
 
 9. **PR after the user agrees.** Push and `gh pr create --base dev` with a body that
    covers what, why, what could go wrong, and evidence, ending with the attribution
-   line from the system reminder. Add a `docs/decisions.md` entry if the slice settled
+   line from the system reminder. Add a `docs/forai/decisions.md` entry if the slice settled
    anything new.

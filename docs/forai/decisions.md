@@ -1,5 +1,8 @@
 # Decisions
 
+The working log, written during the work. The readable version, current state only, is
+[`../forengineer/decisions.md`](../forengineer/decisions.md); update it when this changes.
+
 Design decisions, newest last. Each one feeds NOTES.md §1–3.
 
 ## Time log
