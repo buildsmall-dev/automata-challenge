@@ -5,7 +5,7 @@ that finds them. These get solved later, or written up in NOTES.md §5 if we don
 
 | # | Concern | Where it bites | Solve in / when |
 | --- | --- | --- | --- |
-| K1 | `error` carries three things: why a step is unresolved, why it failed, and a warning on a completed step (D2). A tool that only reads `status` misses a corruption warning | Scientists and tools reading REST | GraphQL: a separate data-integrity field |
+| K1 | `error` carries three things: why a step is unresolved, why it failed, and a warning on a completed step (D2). A tool that only reads `status` misses a corruption warning | Scientists and tools reading REST | Done in GraphQL (D6): `Attempt.data` shows `verified` and every storage read-back with `matches`, so a later mismatch on a completed read is its own field. REST's `error` still carries all three |
 | K2 | A step holds one attempt. Evidence for an earlier job is dropped, not kept as history | Retries: the record can't show what earlier attempts did | Done: every attempt kept (lifecycle slice), and facts for an earlier job reach it (store slice, K45) |
 | K3 | A failed outcome with an empty instrument error gives `error: null` | Failed steps without an explanation | When the driver's failure events are built (S4): always send a message |
 | K4 | A wrong `DataLost` while an upload is only slow fails the read until a matching `DataStored` arrives | Brief false failure under storage outages | Done in R1: `data_lost` only from a restarted driver, after storage says absent past the upload grace |
