@@ -271,3 +271,46 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
 - **Slice / PR:** this PR records it. Slices follow: protocol (`retryable`), lifecycle
   (attempts, the all-attempts rule), store (lookup by job id), policy (config, retries), then
   a `/break` run with hang faults.
+
+## D5. Cancel: stop what has not started, keep the evidence of what has; the run says why it stopped
+
+- **Question:** what `CancelRun` does to each step, and what a cancelled run's status is once
+  in-flight work ends (K42), including a claim that never started (K54).
+- **Chosen:**
+  - **One transaction for the whole cancel.** Every step of the run is locked in `position`
+    order (K12), and `Cancel` is applied to each, so the cancel is never half applied.
+  - **What a cancel does to each step:**
+    - not sent → never will be;
+    - sent, not claimed → cancelled, and exactly one of claim and cancel wins (D1);
+    - claimed or running → not stopped, and its late facts are recorded (D1);
+    - no new attempt after the cancel (D4); a lost read is not re-read and stays open (D3).
+  - **A run not started** is cancelled at once. **A finished run** is left as it is.
+  - **Withdrawn claim (K54):**
+    - When a claim already granted is asked for again after a cancel, and the attempt has no
+      evidence, the claim is withdrawn and the driver is told `abort`. The step can then end
+      `cancelled`.
+    - A driver asks for a claim only before it runs a job, and only for one its ledger doesn't
+      have, so the request itself proves the job never started.
+    - S7's resend is what asks again.
+    - It rests on one driver process per instrument (K55).
+  - **The run's final status (rule 1),** once nothing is in flight:
+    - `completed` if every step completed (the cancel came too late to stop any);
+    - `failed` if a step failed on its own (the policy gave up, whether or not there was a
+      cancel);
+    - `cancelled` otherwise, meaning the cancel is why the rest didn't happen.
+    - A step whose retry the cancel prevented is `failed`, "…; not retried: cancelled", and
+      counts towards `cancelled`, not `failed`.
+- **Alternatives:**
+  - *Rule 2, `cancelled` whenever a cancel was requested and not every step completed:*
+    rejected, because it hides a failure that happened on its own (user review).
+  - *Stop resending a claimed step once it's cancelled:* rejected. A step whose driver died
+    would then stay `running` for ever, because the resend is the only way to learn it
+    never started.
+  - *A run-level `cancel_requested` column:* rejected, because the steps' `Cancelled`
+    already records it, with no schema change.
+- **Rests on:** the ledger is written before anything physical happens, and the driver claims
+  only before running (inferred: `instrument.go`, `adapter.go` `accept`/`claim`); measured
+  live in the S7/cancel PR.
+- **Known limits:** work already started is not stopped, by design. A cancelled run whose
+  lost read never reappears stays `running` (K39; operator abandon is deferred).
+- **Slice / PR:** cancel slice.
