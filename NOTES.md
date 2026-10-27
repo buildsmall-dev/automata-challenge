@@ -438,17 +438,25 @@ None of these makes the record false. Detail and possible fixes are in
 
 ## 6. How long I spent
 
-<!-- TODO(user): total time actually spent, roughly. Not derived from commit times. -->
+The project took roughly 10 hours overall, including AI-assisted implementation, testing and review cycles.
 
-_To be filled in._
+My own active time was around 4–5 hours, mainly spent on architecture, evaluating design alternatives, making decisions, reviewing results, investigating failures and refining the AI development workflow.
 
 ---
 
 ## What I thought of the exercise
 
-<!-- TODO(user): what was unclear, what was annoying, what you would change. -->
+I enjoyed the exercise. It reminded me of some of my earlier work on industrial control systems and communication protocols, where you have to be careful about what happens when software interacts with physical equipment. A timeout doesn't mean an operation didn't happen, and getting that wrong can have real consequences.
 
-_To be filled in._
+One thing I found interesting was how much the way I worked with AI affected the result. At the beginning, I moved a bit too quickly and followed an architecture suggested by AI. After thinking through some failure scenarios, I realised parts of it didn't really make sense. I went back, explored the alternatives more carefully, and started using interactive HTML diagrams to help discuss and understand the design. That was useful, especially for getting the core architecture right before building more on top of it.
+
+I also spent time setting up and refining the project-specific skills and development workflow. I think this is an important part of working with AI, not just something to do once at the start. On a real project, I'd spend more time improving these workflows as the team learns, capturing what works and making it reusable for others. A good setup helps keep the work consistent, but it also needs to evolve.
+
+AI can take on a lot of the implementation, testing and documentation work. But I still think the important design decisions need to be owned by engineers. It's easy to accept something that looks reasonable at first, so being willing to question it, test it and change direction matters.
+
+I particularly liked the chaos tools and instrument ledgers. They gave me a way to check whether the system actually behaved as expected, rather than just trusting the code or the explanation. A few experiments proved my initial assumptions wrong, which was probably the most useful part of the exercise.
+
+Overall, I liked that the exercise gave me room to explore different approaches, make trade-offs and change my mind based on evidence.
 
 ---
 
