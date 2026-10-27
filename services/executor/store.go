@@ -7,29 +7,38 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/automata-tech/distributed-systems-interview/services/common/protocol"
 )
 
-// ErrUnknownJob: no step's current attempt has this job id.
+// ErrUnknownJob: no step has an attempt with this job id.
 var ErrUnknownJob = errors.New("unknown job")
 
 // applyToStep applies a fact to the step of a run named name. For intent we
-// issue ourselves (dispatch, cancel).
+// issue ourselves (dispatch, cancel) and our own read-backs of storage.
 func (e *Executor) applyToStep(ctx context.Context, runID, name string, f Fact) (Step, bool, error) {
-	return e.apply(ctx, `run_id = $1 AND name = $2`, []any{runID, name}, f)
+	return e.apply(ctx, `run_id = $1 AND name = $2`, []any{runID, name}, "", f)
 }
 
-// applyToJob applies a fact to the step whose current attempt is jobID, if
-// that step is assigned to device. For everything a driver tells us (claims and
-// evidence): only the assigned instrument's ledger is evidence for a step, so a
-// report from any other device is treated as about an unknown job.
+// applyToJob applies a fact to the attempt jobID, if its step is assigned to
+// device. For everything a driver tells us (claims and evidence): only the
+// assigned instrument's ledger is evidence for a step, so a report from any
+// other device is treated as about an unknown job. The step is found from the
+// job id, not the job_id column, which holds only the latest attempt: a fact
+// for an earlier one still reaches it (D4, K45).
 func (e *Executor) applyToJob(ctx context.Context, device, jobID string, f Fact) (Step, bool, error) {
-	return e.apply(ctx, `job_id = $1 AND device_id = $2`, []any{jobID, device}, f)
+	runID, name, _, ok := protocol.ParseJobID(jobID)
+	if !ok {
+		return Step{}, false, fmt.Errorf("%w: %s is not a job id", ErrUnknownJob, jobID)
+	}
+	return e.apply(ctx, `run_id = $1 AND name = $2 AND device_id = $3`, []any{runID, name, device}, jobID, f)
 }
 
 // apply is load, Apply, save in one transaction. FOR UPDATE makes a second
 // writer to the same step wait until the first commits and then read its
-// result, so no fact is lost and claim and cancel are ordered.
-func (e *Executor) apply(ctx context.Context, where string, args []any, f Fact) (Step, bool, error) {
+// result, so no fact is lost and claim and cancel are ordered. If job is set,
+// the step must have an attempt for it.
+func (e *Executor) apply(ctx context.Context, where string, args []any, job string, f Fact) (Step, bool, error) {
 	tx, err := e.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Step{}, false, fmt.Errorf("begin: %w", err)
@@ -49,6 +58,9 @@ func (e *Executor) apply(ctx context.Context, where string, args []any, f Fact) 
 	s, err := decodeStep(raw)
 	if err != nil {
 		return Step{}, false, fmt.Errorf("step %s/%s: %w", runID, name, err)
+	}
+	if job != "" && s.attempt(job) == nil {
+		return Step{}, false, fmt.Errorf("%w: %s has no attempt %s", ErrUnknownJob, name, job)
 	}
 
 	s, changed := Apply(s, f)

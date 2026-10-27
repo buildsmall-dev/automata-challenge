@@ -150,3 +150,24 @@ func matches(pattern, subject string) bool {
 	}
 	return len(p) == len(s)
 }
+
+func TestParseJobID(t *testing.T) {
+	for _, c := range []struct {
+		job, run, step string
+		attempt        int
+		ok             bool
+	}{
+		{JobID("run-1", "fill", 1), "run-1", "fill", 1, true},
+		{JobID("run-1", "read/plate", 12), "run-1", "read/plate", 12, true}, // the run id has no slash; the step may
+		{"run-1/fill", "", "", 0, false},
+		{"run-1/fill/x", "", "", 0, false},
+		{"run-1/fill/0", "", "", 0, false},
+		{"/fill/1", "", "", 0, false},
+		{"run-1//1", "", "", 0, false},
+	} {
+		run, step, attempt, ok := ParseJobID(c.job)
+		if run != c.run || step != c.step || attempt != c.attempt || ok != c.ok {
+			t.Errorf("ParseJobID(%q) = %q, %q, %d, %v; want %q, %q, %d, %v", c.job, run, step, attempt, ok, c.run, c.step, c.attempt, c.ok)
+		}
+	}
+}
