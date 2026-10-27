@@ -15,8 +15,8 @@ import (
 
 // What the executor tells the drivers (docs/decisions.md D1). A loop moves each
 // running run forward: dispatch what the scheduler says is ready, send the
-// command for every dispatched step until a driver has claimed it, and finish
-// the run once nothing is left in flight. Everything it acts on is read from
+// command for every dispatched step until there is evidence it started, and
+// finish the run once nothing is left in flight. Everything it acts on is read from
 // Postgres each time, so a restarted executor carries on where the last stopped.
 
 const (
@@ -106,7 +106,11 @@ func (e *Executor) advance(ctx context.Context, runID string, dispatched map[str
 	for _, s := range steps {
 		switch s.phase {
 		case PhasePending, PhaseCompleted, PhaseFailed, PhaseCancelled:
-		case PhaseDispatched, PhaseRetrying:
+		case PhaseDispatched, PhaseRetrying, PhaseClaimed:
+			// Claimed is sent too, the same job (D1, S7): a driver that died
+			// after its claim, or whose instrument refused the job, has nothing
+			// in its ledger and no event will come. A driver that has the job
+			// answers known; one that has no record of it claims it again.
 			inFlight = true
 			dispatched[s.jobID] = true
 			e.send(ctx, runID, s)
@@ -185,8 +189,9 @@ func (e *Executor) loadSteps(ctx context.Context, runID string) ([]stepRow, erro
 }
 
 // send asks the step's driver to run it, at most one request per job at a time
-// and no sooner than the last answer allows. A lost or late command is harmless:
-// the driver answers a repeat with "known", and runs only after a claim.
+// and no sooner than the last answer allows. A lost, late or repeated command is
+// harmless: the driver answers "known" for a job in flight or in its ledger,
+// which has it before anything physical happens, and runs only after a claim.
 func (e *Executor) send(ctx context.Context, runID string, s stepRow) {
 	e.sendMu.Lock()
 	if e.sending[s.jobID] || time.Now().Before(e.notBefore[s.jobID]) {

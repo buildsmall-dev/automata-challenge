@@ -597,3 +597,49 @@ func TestReplayedFailureIsNotRetryable(t *testing.T) {
 		t.Fatalf("replayed finished = %+v, want failed and not retryable", fin)
 	}
 }
+
+// The resend after a crash is safe because a restarted driver answers a job its
+// ledger already has with known, and never runs it again (D1, S7). The ledger
+// is written before anything physical happens, so a job that started is in it.
+func TestRestartedDriverNeverRunsALedgerJobAgain(t *testing.T) {
+	job := protocol.JobID("run-x", "read_plate", 1)
+	cfg := before(t, instrument.Config{}, func(in *instrument.Instrument) { runJob(t, in, job) })
+	r := newRig(t, cfg, true)
+	asked := r.claimer(protocol.ClaimGo)
+	if got := r.send(protocol.NewRunCommand("run-x", "read_plate", 1)); got != protocol.RunKnown {
+		t.Errorf("command for a job in the ledger after a restart = %s, want known", got)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if n := len(r.executions(job)); n != 1 || len(*asked) != 0 {
+		t.Errorf("ledger has %d executions and %d claims, want 1 and none", n, len(*asked))
+	}
+}
+
+// The executor resends while a job is claimed (S7), so a repeat can arrive
+// while the claim is still being answered, before the instrument has the job.
+// The driver's own record of the job in flight answers it: known, not run.
+func TestRepeatDuringTheClaimIsKnown(t *testing.T) {
+	r := newRig(t, instrument.Config{}, true)
+	sub, err := r.nc.Subscribe(protocol.ClaimSubject, func(m *nats.Msg) {
+		time.Sleep(400 * time.Millisecond) // the executor is slow to answer
+		b, _ := json.Marshal(protocol.ClaimReply{V: protocol.Version, Result: protocol.ClaimGo})
+		m.Respond(b)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sub.Unsubscribe() })
+	cmd := protocol.NewRunCommand("run-1", "fill", 1)
+	r.send(cmd)
+	time.Sleep(100 * time.Millisecond)
+	if n := len(r.executions(cmd.JobID)); n != 0 {
+		t.Fatalf("job started before its claim was answered (%d executions)", n)
+	}
+	if got := r.send(cmd); got != protocol.RunKnown {
+		t.Errorf("repeat during the claim = %s, want known", got)
+	}
+	r.events(2, 3*time.Second)
+	if n := len(r.executions(cmd.JobID)); n != 1 {
+		t.Errorf("ledger has %d executions, want 1", n)
+	}
+}

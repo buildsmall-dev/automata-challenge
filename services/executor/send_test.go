@@ -42,6 +42,7 @@ type fakeDriver struct {
 	lose      map[string]bool      // job or step -> report its data lost after finishing
 	retryable map[string]bool      // job or step -> a failure the instrument says may be repeated
 	stall     map[string]bool      // job or step -> claim it, then never start it (a driver that died)
+	slow      time.Duration        // between a granted claim and the instrument starting
 	sub       *nats.Subscription
 }
 
@@ -117,6 +118,7 @@ func (d *fakeDriver) execute(cmd protocol.RunCommand) {
 	if stall {
 		return
 	}
+	time.Sleep(d.slow)
 	start := time.Now().UTC()
 	end := start.Add(10 * time.Millisecond)
 	d.mu.Lock()
@@ -404,5 +406,55 @@ func TestLostReadIsReadAgain(t *testing.T) {
 		if s.Name == "read_plate" && (s.DataRef == nil || !strings.HasSuffix(*s.DataRef, protocol.DataKey(second))) {
 			t.Errorf("read_plate data_ref = %v, want the re-read's object", s.DataRef)
 		}
+	}
+}
+
+// K19/K25, S7: the driver dies after its claim is granted and before the job
+// starts, so nothing is in its ledger and no event will come. The executor keeps
+// sending the same job while it is claimed without evidence; the restarted
+// driver has no record of it, claims it again, is told go, and runs it once.
+func TestClaimedJobIsResentAfterADriverCrash(t *testing.T) {
+	h := newHarness(t)
+	crashed := newFakeDriver(t, h.nc, "liquid-handler-1").serve()
+	newFakeDriver(t, h.nc, "incubator-1").serve()
+	rv := h.startRun(sendWorkflow)
+	fill := protocol.JobID(rv.ID, "fill", 1)
+	crashed.mu.Lock()
+	crashed.stall[fill] = true
+	crashed.mu.Unlock()
+
+	for deadline := time.Now().Add(5 * time.Second); phaseOf(t, h.e, rv.ID, "fill") != PhaseClaimed; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("fill never claimed: %s", phaseOf(t, h.e, rv.ID, "fill"))
+		}
+	}
+	crashed.sub.Unsubscribe() // the driver process is gone
+	restarted := newFakeDriver(t, h.nc, "liquid-handler-1").serve()
+
+	h.waitRun(rv.ID, RunCompleted, 15*time.Second)
+	if n := restarted.ran(fill); n != 1 {
+		t.Errorf("restarted driver ran fill %d times, want once", n)
+	}
+	if got := stepView(t, h.e, rv.ID, "fill"); got.Status != StepCompleted {
+		t.Errorf("fill is %s, want completed", got.Status)
+	}
+	var attempts int
+	h.e.db.QueryRow(`SELECT jsonb_array_length(lifecycle->'Attempts') FROM steps WHERE run_id = $1 AND name = 'fill'`, rv.ID).Scan(&attempts)
+	if attempts != 1 {
+		t.Errorf("fill has %d attempts, want 1: the same job is resent, not a new attempt", attempts)
+	}
+}
+
+// Resending while a job is claimed is harmless: a driver that has it answers
+// known and does not run it again.
+func TestResendWhileClaimedDoesNotRunTwice(t *testing.T) {
+	h := newHarness(t)
+	lh, _ := h.drivers()
+	lh.slow = 4 * time.Second // claimed, not yet started, across at least one resend
+	rv := h.startRun(sendWorkflow)
+	h.waitRun(rv.ID, RunCompleted, 20*time.Second)
+	fill := protocol.JobID(rv.ID, "fill", 1)
+	if lh.commands(fill) < 2 || lh.ran(fill) != 1 {
+		t.Errorf("fill: %d commands, ran %d times; want resends while claimed, and one run", lh.commands(fill), lh.ran(fill))
 	}
 }
