@@ -33,8 +33,8 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
   - **Commands:** core request `lab.<device>.cmd.run {v, job_id, run_id, step, attempt}` →
     `accepted | busy | known`. The queue lives in Postgres; the executor dispatches what
     `NextSteps` says is ready in each run (a dispatched step occupies its device) and sends
-    the command until the step is claimed: again after 500ms on busy or no answer, after 3s
-    on accepted or known. A timeout means *unknown*: resend the same `job_id`, never a new
+    the command until there is evidence the job started (claimed is not enough, S7): again
+    after 500ms on busy or no answer, after 3s on accepted or known. A timeout means *unknown*: resend the same `job_id`, never a new
     attempt, don't treat the device as free. Runs sharing a device are not queued against
     each other; they retry on `busy` (K29).
   - **Claim before run:** before `inst.Run` the driver requests `lab.executor.claim {job_id,
@@ -59,9 +59,20 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
     the restart is `hung`), then for each completed read asks storage: present → `stored`;
     absent after an upload grace (2 × the storage timeout) → `data_lost`; no answer → ask
     again.
-  - **Reconcile (R2, not built):** `lab.<device>.job` request/reply answered from ledger and
-    storage, for executor startup and steps claimed but never started (K19, K25). Planned
-    as S7.
+  - **Reconcile (R2, S7): by resending, not by a query.** A step claimed with no evidence
+    (the driver died after its claim, or its instrument refused the job, K19, K25) is sent
+    the same command, with the same `job_id`, every 3s until `started` or another fact
+    arrives. The command is the question:
+    - `known`: the driver has the job in flight or in its ledger, which the instrument
+      writes before anything physical happens (`instrument.go`), so nothing more is done.
+    - `accepted`: the driver has no record of the job, so it never started. The driver
+      claims it again; the attempt is already claimed, so the executor answers `go`, and it
+      runs once.
+    - No answer: unknown stays unknown, so the step stays `running` and the command is asked
+      again.
+
+    A resend is never a new attempt. Because it is driven from Postgres, it also covers an
+    executor restart.
   - **Truth rules:** unknown stays unknown (a claimed step whose driver is unreachable stays
     `running`, never failed on a timer). Late facts always win, even after a cancel. A read
     is `completed` only when the ledger's sha256 equals the hash of the object at its key,
@@ -115,6 +126,10 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
     checks storage for each completed read (R1).
   - Events whose device does not match their subject, or the step's assigned device, are
     dropped (S5a, K15).
+  - (2026-10-27) R2 was a `lab.<device>.job` query; it is a resend of the same command while
+    a step is claimed with no evidence (S7). The command already asks the driver what it
+    knows of the job, and its idempotence (`known`) is what makes the resend safe, so a
+    query would add a subject and driver code to learn nothing more.
 
 ## D2. A verified completion is never undone; later storage problems are reported
 
