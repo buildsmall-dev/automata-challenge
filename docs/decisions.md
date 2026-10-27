@@ -319,3 +319,44 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
 - **Known limits:** work already started is not stopped, by design. A cancelled run whose
   lost read never reappears stays `running` (K39; operator abandon is deferred).
 - **Slice / PR:** cancel slice.
+
+## D6. GraphQL is a second view of the same rows: the REST record plus every attempt
+
+- **Question:** what `/graphql` exposes and where its answers come from. A second API that
+  kept its own state, or derived the record differently, could contradict REST.
+- **Chosen:**
+  - **No state of its own.**
+    - A step's fields are the columns REST reads.
+    - Its `attempts` are the lifecycle JSON in the same row.
+    - The run and all its steps are read in one repeatable-read, read-only transaction, so
+      they are seen as of one moment.
+    - Mutations call the `Executor` methods, then read the record again.
+  - **What it adds to REST:**
+    - `phase` (dispatched, claimed, storing, unresolved, ended…);
+    - `cancelRequested`;
+    - every attempt, with its own ledger times, outcome, retryable flag and why it is
+      unresolved (K53);
+    - for reads, the ledger digest and every storage read-back, with `matches` and
+      `verified` (K1).
+  - **Operations:**
+    - `run(id)` (null if unknown), `runs(status)`, `workflows`;
+    - `createRun`, `startRun`, `cancelRun`;
+    - errors carry `extensions.code`: `NOT_FOUND`, `BAD_USER_INPUT`, `WORKFLOWS_INVALID`,
+      `INTERNAL` (detail only in the log, as in REST).
+  - **Library:** `graph-gophers/graphql-go`, schema first. The SDL in `graphql.go` is the
+    design, and resolvers are struct fields.
+  - **Following a run:** tools poll `run(id)`.
+- **Alternatives:**
+  - *gqlgen:* type-safe, but adds a generator and thousands of generated lines (user's choice).
+  - *Subscriptions:* need a websocket transport and a change feed the executor doesn't have
+    (the dispatch loop is poked in-process). Polling a snapshot is enough for a lab run that
+    takes seconds to minutes (user's choice).
+  - *Attempts as their own table:* rejected, because the lifecycle already holds them and a
+    copy could drift.
+- **Rests on:**
+  - `saveStep` writes the columns and the lifecycle in one `UPDATE` (inferred, `store.go`).
+  - Each attempt's times are the ledger's, carried by the events. Measured live: three hung
+    plate-reader attempts match the three ledger executions, while REST shows only the last.
+- **Would revisit if:** tools need push updates, or runs grow into the thousands (`runs` has
+  no pagination, K60).
+- **Slice / PR:** GraphQL slice.
