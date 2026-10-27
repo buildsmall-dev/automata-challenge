@@ -32,6 +32,7 @@ type stepRow struct {
 	phase        Phase
 	jobID        string
 	finishedAt   *time.Time
+	step         Step
 }
 
 func (e *Executor) dispatchLoop(ctx context.Context) {
@@ -137,26 +138,30 @@ func (e *Executor) advance(ctx context.Context, runID string, dispatched map[str
 	return nil
 }
 
-// finish ends a run once no step can move any more: completed if every step
-// completed, failed if one failed. Its finished_at is the last ledger time.
+// finish ends a run once no step can move any more (K42): completed if every
+// step completed, even after a cancel that came too late to stop any; failed if
+// a step failed on its own (the policy gave up, cancel or not); cancelled if the
+// cancel is why the rest did not happen. Its finished_at is the last ledger time.
 func (e *Executor) finish(ctx context.Context, runID string, steps []stepRow) error {
-	status, last := RunCompleted, time.Time{}
+	completed, failed, cancelled, last := true, false, false, time.Time{}
 	for _, s := range steps {
-		switch s.phase {
-		case PhaseFailed:
-			status = RunFailed
-		case PhaseCompleted:
-		default:
-			if status != RunFailed {
-				status = "" // pending with nothing failed: not finished
-			}
-		}
+		completed = completed && s.phase == PhaseCompleted
+		failed = failed || (s.phase == PhaseFailed && s.step.GaveUp != CancelledReason)
+		cancelled = cancelled || s.step.Cancelled
 		if s.finishedAt != nil && s.finishedAt.After(last) {
 			last = *s.finishedAt
 		}
 	}
-	if status == "" {
-		return nil
+	var status string
+	switch {
+	case completed:
+		status = RunCompleted
+	case failed:
+		status = RunFailed
+	case cancelled:
+		status = RunCancelled
+	default:
+		return nil // pending with nothing failed or cancelled: not finished
 	}
 	if last.IsZero() {
 		last = time.Now()
@@ -169,7 +174,7 @@ func (e *Executor) finish(ctx context.Context, runID string, steps []stepRow) er
 
 func (e *Executor) loadSteps(ctx context.Context, runID string) ([]stepRow, error) {
 	rows, err := e.db.QueryContext(ctx,
-		`SELECT name, device_id, depends_on, phase, job_id, finished_at FROM steps WHERE run_id = $1 ORDER BY position`, runID)
+		`SELECT name, device_id, depends_on, phase, job_id, finished_at, lifecycle FROM steps WHERE run_id = $1 ORDER BY position`, runID)
 	if err != nil {
 		return nil, fmt.Errorf("load steps: %w", err)
 	}
@@ -179,8 +184,13 @@ func (e *Executor) loadSteps(ctx context.Context, runID string) ([]stepRow, erro
 		var s stepRow
 		var deps pq.StringArray
 		var job sql.NullString
-		if err := rows.Scan(&s.name, &s.device, &deps, &s.phase, &job, &s.finishedAt); err != nil {
+		var raw []byte
+		if err := rows.Scan(&s.name, &s.device, &deps, &s.phase, &job, &s.finishedAt, &raw); err != nil {
 			return nil, fmt.Errorf("scan step: %w", err)
+		}
+		var err error
+		if s.step, err = decodeStep(raw); err != nil {
+			return nil, fmt.Errorf("step %s: %w", s.name, err)
 		}
 		s.dependsOn, s.jobID = deps, job.String
 		steps = append(steps, s)

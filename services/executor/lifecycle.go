@@ -72,6 +72,7 @@ type Attempt struct {
 	// Intent.
 	Claimed   bool
 	Cancelled bool // stopped before its claim
+	Withdrawn bool // claimed, then shown never to have started after a cancel (K54)
 
 	// Evidence. Times come from the instrument's ledger, not from our clock.
 	StartedAt       *time.Time
@@ -157,8 +158,16 @@ func Apply(s Step, f Fact) (Step, bool) {
 			s.GaveUp = f.Reason
 		}
 	case Claimed:
-		if a := s.attempt(f.JobID); a != nil && !a.Cancelled {
+		a := s.attempt(f.JobID)
+		switch {
+		case a == nil || a.Cancelled || a.Withdrawn:
+		case !a.Claimed:
 			a.Claimed = true
+		case s.Cancelled && !a.hasEvidence():
+			// Asked again after a cancel. A driver asks for a claim only before it
+			// runs a job, and only for one its ledger does not have, so this job
+			// never started: withdraw the claim, and the driver is told abort.
+			a.Withdrawn = true
 		}
 	case Started:
 		if a := s.attempt(f.JobID); a != nil && a.StartedAt == nil {
@@ -229,10 +238,10 @@ func (s Step) attempt(jobID string) *Attempt {
 }
 
 // claimed: the driver may run this job. A claim granted stays granted, even
-// after a cancel (D1).
+// after a cancel (D1), unless a later claim shows the job never started.
 func (s Step) claimed(jobID string) bool {
 	a := s.attempt(jobID)
-	return a != nil && a.Claimed
+	return a != nil && a.Claimed && !a.Withdrawn
 }
 
 // JobID is the latest attempt's job, the one commands are sent for.
@@ -294,7 +303,9 @@ func (s Step) Phase() Phase {
 		}
 		return p
 	}
-	if s.GaveUp != "" || s.Cancelled {
+	// Every attempt has ended. Only the policy says why there is no other, even
+	// after a cancel: it may have been final anyway (D5).
+	if s.GaveUp != "" {
 		return PhaseFailed
 	}
 	return PhaseEnded
@@ -308,15 +319,11 @@ func (s Step) Times() (started, finished *time.Time) {
 	return nil, nil
 }
 
-// whyNoMore says why a failed step will not be tried again.
-func (s Step) whyNoMore() string {
-	if s.GaveUp != "" {
-		return s.GaveUp
-	}
-	return "not retried: cancelled"
-}
+// CancelledReason is why a step is not tried again when the cancel is what
+// stopped it: the policy would have made another attempt (D5).
+const CancelledReason = "not retried: cancelled"
 
-func (a Attempt) ran() bool { return a.Claimed || a.hasEvidence() }
+func (a Attempt) ran() bool { return (a.Claimed && !a.Withdrawn) || a.hasEvidence() }
 
 func (a Attempt) hasEvidence() bool {
 	return a.StartedAt != nil || a.Outcome != "" || len(a.Checks) > 0 || a.DataLost
@@ -352,7 +359,7 @@ func (a Attempt) phase(producesData bool) Phase {
 	switch {
 	case a.hasEvidence():
 		return PhaseRunning
-	case a.Cancelled:
+	case a.Cancelled || a.Withdrawn:
 		return PhaseCancelled
 	case a.Claimed:
 		return PhaseClaimed
@@ -446,7 +453,10 @@ func (s Step) APIError() *string {
 	case PhaseEnded:
 		msg = a.failure()
 	case PhaseFailed:
-		msg = a.failure() + "; " + s.whyNoMore()
+		msg = s.GaveUp
+		if f := a.failure(); f != "" {
+			msg = f + "; " + msg
+		}
 	case PhaseCompleted:
 		msg = a.warning()
 	}
