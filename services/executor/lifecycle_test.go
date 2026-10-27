@@ -269,3 +269,23 @@ func typeNames(fs []Fact) []string {
 	}
 	return out
 }
+
+// Retryable is the instrument's word about a failure, kept from the first
+// report; a replay without it does not take it back, and it means nothing on
+// another outcome (D4).
+func TestRetryableBelongsToAFailure(t *testing.T) {
+	failed := ran(OutcomeFailed, "")
+	failed.Retryable = true
+	replayed := ran(OutcomeFailed, "")
+	if s := applyAll(Step{}, dispatched, claimed, failed, replayed); !s.Retryable {
+		t.Errorf("a retryable failure, then the same failure replayed: Retryable = false")
+	}
+	if s := applyAll(Step{}, dispatched, claimed, replayed, failed); s.Retryable {
+		t.Errorf("first report said not retryable, a later one cannot change it: Retryable = true")
+	}
+	odd := ran(OutcomeHung, "")
+	odd.Retryable = true
+	if s := applyAll(Step{}, dispatched, claimed, odd); s.Retryable {
+		t.Errorf("a hang marked retryable: Retryable = true, want false")
+	}
+}

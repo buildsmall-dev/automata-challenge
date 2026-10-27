@@ -114,7 +114,10 @@ type Event struct {
 	Outcome    string     `json:"outcome,omitempty"`     // completed | failed | hung, as in the ledger
 	Error      string     `json:"error,omitempty"`
 	SHA        string     `json:"sha256,omitempty"` // ledger data_sha256
-	Ref        string     `json:"ref,omitempty"`    // s3://bucket/key
+	// Retryable is the instrument's word that a failure may be repeated. Only
+	// Run's return has it, not the ledger, so absent means not retryable (D4).
+	Retryable bool   `json:"retryable,omitempty"`
+	Ref       string `json:"ref,omitempty"` // s3://bucket/key
 }
 
 func (e Event) Validate() error {

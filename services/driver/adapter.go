@@ -128,7 +128,19 @@ func (d *driver) execute(ctx context.Context, cmd protocol.RunCommand) {
 	if !ok {
 		return
 	}
-	d.publish(ctx, finishedEvent(done))
+	fin := finishedEvent(done)
+	if done.Outcome == instrument.OutcomeFailed {
+		// Only Run's return says whether the failure may be repeated (D4), and
+		// it returns just after the ledger records the end. Cut off before
+		// then, report nothing: replay reports it, as not retryable.
+		select {
+		case <-r.done:
+			fin.Retryable = r.err == nil && r.out.Retryable
+		case <-ctx.Done():
+			return
+		}
+	}
+	d.publish(ctx, fin)
 
 	if done.Outcome == instrument.OutcomeCompleted && d.inst.ProducesData() {
 		select {
