@@ -289,3 +289,20 @@ func phaseOf(t *testing.T, e *Executor, runID, name string) Phase {
 	}
 	return p
 }
+
+// Nothing repeats a hang yet, so a hung step ends failed with the reason, and
+// so does its run (D4). Before D4 it stayed running for ever.
+func TestHungStepFailsItsRun(t *testing.T) {
+	h := newHarness(t)
+	lh, inc := h.drivers()
+	inc.outcome["incubate"] = "hung"
+	rv := h.startRun(sendWorkflow)
+	h.waitRun(rv.ID, RunFailed, 10*time.Second)
+	sv := stepView(t, h.e, rv.ID, "incubate")
+	if sv.Status != StepFailed || sv.Error == nil || *sv.Error != "instrument hung; outcome unknown; not repeated" {
+		t.Errorf("incubate: %s, %v; want failed, instrument hung; outcome unknown; not repeated", sv.Status, sv.Error)
+	}
+	if n := lh.commands(protocol.JobID(rv.ID, "wash", 1)); n != 0 {
+		t.Errorf("wash was commanded %d times after incubate failed", n)
+	}
+}

@@ -96,7 +96,7 @@ func (e *Executor) CreateRun(ctx context.Context, workflowName string, steps []S
 	for position, st := range steps {
 		// A nil slice would be stored as NULL, not as an empty array.
 		deps := append([]string{}, st.DependsOn...)
-		lifecycle, err := json.Marshal(Step{ProducesData: producesData(st.DeviceID)})
+		lifecycle, err := json.Marshal(NewStep(producesData(st.DeviceID)))
 		if err != nil {
 			return RunView{}, fmt.Errorf("encode step %s: %w", st.Name, err)
 		}

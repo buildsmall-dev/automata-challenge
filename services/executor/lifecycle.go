@@ -10,21 +10,28 @@ import (
 // The lifecycle of one step: which facts can change it, and what the record may
 // then claim.
 //
-// Two kinds of fact. Intent (Dispatched, Claimed, Cancel) is ours: Postgres
-// orders it, and the order matters, because a claim and a cancel decide each
-// other. Evidence (Started, Finished, DataStored) comes from the instrument and
-// from storage and can arrive in any order, so it is merged regardless of order
-// and the phase is derived from what we know.
+// Two kinds of fact. Intent (Dispatched, Claimed, Cancel, GaveUp) is ours:
+// Postgres orders it, and the order matters, because a claim and a cancel decide
+// each other. Evidence (Started, Finished, DataStored, DataLost) comes from the
+// instrument and from storage and can arrive in any order, so it is merged
+// regardless of order and the phase is derived from what we know.
+//
+// A step can take several attempts (D4), each a job of its own, and every one is
+// kept. The step is decided by all of them: completed once any attempt is
+// verified, failed only when every attempt has ended and no further one will be
+// made, running otherwise.
 
 type Phase string
 
 const (
 	PhasePending    Phase = "pending"    // not sent to a device
 	PhaseDispatched Phase = "dispatched" // command sent, nothing physical yet
+	PhaseRetrying   Phase = "retrying"   // a later attempt sent, not claimed yet; an earlier one ran
 	PhaseClaimed    Phase = "claimed"    // driver may start it; the cancel point has passed
 	PhaseRunning    Phase = "running"    // the instrument has started it
 	PhaseStoring    Phase = "storing"    // read completed, its data is not verified in storage yet
-	PhaseUnresolved Phase = "unresolved" // evidence is not enough to say how it ended; see Reason
+	PhaseUnresolved Phase = "unresolved" // evidence is not enough to say how it ended; see the error
+	PhaseEnded      Phase = "ended"      // every attempt has ended unsuccessfully; retry not decided yet
 	PhaseCompleted  Phase = "completed"
 	PhaseFailed     Phase = "failed"
 	PhaseCancelled  Phase = "cancelled"
@@ -39,14 +46,32 @@ const (
 	OutcomeHung      Outcome = "hung"
 )
 
+// lifecycleVersion is the shape of Step as stored in steps.lifecycle. A row of
+// any other version is refused, not misread (K10).
+const lifecycleVersion = 2
+
 type Step struct {
+	V            int
 	ProducesData bool
 
+	// Intent for the step as a whole.
+	Cancelled bool   // no new attempt after a cancel; the current one stops only if not yet claimed
+	GaveUp    string // no further attempt will be made, and why
+	Decided   int    // the attempt that completed the step, fixed when it first did (D2)
+
+	Attempts []Attempt // attempt n is Attempts[n-1]
+}
+
+func NewStep(producesData bool) Step { return Step{V: lifecycleVersion, ProducesData: producesData} }
+
+// Attempt is one job sent to the step's device.
+type Attempt struct {
+	JobID string
+	N     int
+
 	// Intent.
-	JobID     string // the current attempt; evidence for any other job is ignored
-	Attempt   int
 	Claimed   bool
-	Cancelled bool
+	Cancelled bool // stopped before its claim
 
 	// Evidence. Times come from the instrument's ledger, not from our clock.
 	StartedAt       *time.Time
@@ -74,6 +99,9 @@ type Dispatched struct {
 }
 type Claimed struct{ JobID string }
 type Cancel struct{}
+
+// GaveUp: every attempt has ended and no further one will be made.
+type GaveUp struct{ Reason string }
 type Started struct {
 	JobID string
 	At    time.Time
@@ -99,6 +127,7 @@ type DataLost struct{ JobID string }
 func (Dispatched) fact() {}
 func (Claimed) fact()    {}
 func (Cancel) fact()     {}
+func (GaveUp) fact()     {}
 func (Started) fact()    {}
 func (Finished) fact()   {}
 func (DataStored) fact() {}
@@ -107,123 +136,280 @@ func (DataLost) fact()   {}
 // Apply returns the step with the fact merged in, and whether anything changed.
 func Apply(s Step, f Fact) (Step, bool) {
 	before := s
+	if s.Attempts != nil {
+		s.Attempts = slices.Clone(s.Attempts) // before must keep its own attempts
+	}
 	switch f := f.(type) {
 	case Dispatched:
-		if s.JobID == "" && !s.Cancelled {
-			s.JobID, s.Attempt = f.JobID, f.Attempt
-		}
-	case Claimed:
-		if f.JobID == s.JobID && !s.Cancelled {
-			s.Claimed = true
+		if s.mayAttempt(f.Attempt) {
+			s.Attempts = append(s.Attempts, Attempt{JobID: f.JobID, N: f.Attempt})
 		}
 	case Cancel:
-		// A cancel stops what has not started. Once claimed, the driver may be
-		// running it, and only evidence can say how it ended.
-		if !s.Claimed && !s.hasEvidence() {
-			s.Cancelled = true
+		// A cancel stops what has not started, and every attempt after it. Once
+		// claimed, the driver may be running it, and only evidence can say how
+		// it ended (D1).
+		s.Cancelled = true
+		if a := s.current(); a != nil && !a.ran() {
+			a.Cancelled = true
+		}
+	case GaveUp:
+		if s.GaveUp == "" && s.Phase() == PhaseEnded {
+			s.GaveUp = f.Reason
+		}
+	case Claimed:
+		if a := s.attempt(f.JobID); a != nil && !a.Cancelled {
+			a.Claimed = true
 		}
 	case Started:
-		if f.JobID == s.JobID && s.StartedAt == nil {
-			s.StartedAt = &f.At
+		if a := s.attempt(f.JobID); a != nil && a.StartedAt == nil {
+			a.StartedAt = &f.At
 		}
 	case Finished:
-		if f.JobID != s.JobID {
+		a := s.attempt(f.JobID)
+		if a == nil {
 			break
 		}
-		if s.Outcome == "" {
-			s.Outcome, s.InstrumentError, s.LedgerSHA = f.Outcome, f.Error, f.SHA
-			s.StartedAt, s.FinishedAt = &f.StartedAt, &f.FinishedAt
-			s.Retryable = f.Retryable && f.Outcome == OutcomeFailed
-		} else if (f.Outcome != s.Outcome || f.SHA != s.LedgerSHA) && s.Conflict == "" {
-			s.Conflict = fmt.Sprintf("conflicting outcomes reported for %s: %s, then %s", f.JobID, s.Outcome, f.Outcome)
+		if a.Outcome == "" {
+			a.Outcome, a.InstrumentError, a.LedgerSHA = f.Outcome, f.Error, f.SHA
+			a.StartedAt, a.FinishedAt = &f.StartedAt, &f.FinishedAt
+			a.Retryable = f.Retryable && f.Outcome == OutcomeFailed
+		} else if (f.Outcome != a.Outcome || f.SHA != a.LedgerSHA) && a.Conflict == "" {
+			a.Conflict = fmt.Sprintf("conflicting outcomes reported for %s: %s, then %s", f.JobID, a.Outcome, f.Outcome)
 		}
 	case DataStored:
-		if f.JobID == s.JobID && !slices.Contains(s.Checks, f.StorageCheck) {
-			s.Checks = append(s.Checks, f.StorageCheck)
+		if a := s.attempt(f.JobID); a != nil && !slices.Contains(a.Checks, f.StorageCheck) {
+			a.Checks = append(a.Checks, f.StorageCheck)
 		}
 	case DataLost:
-		if f.JobID == s.JobID {
-			s.DataLost = true
+		if a := s.attempt(f.JobID); a != nil {
+			a.DataLost = true
+		}
+	}
+	if s.Decided == 0 {
+		for _, a := range s.Attempts {
+			if a.phase(s.ProducesData) == PhaseCompleted {
+				s.Decided = a.N
+				break
+			}
 		}
 	}
 	return s, !reflect.DeepEqual(before, s)
 }
 
-func (s Step) hasEvidence() bool {
-	return s.StartedAt != nil || s.Outcome != "" || len(s.Checks) > 0 || s.DataLost
-}
-
-// verified: some read-back of storage matched what the instrument measured.
-// Once true it stays true, whatever order the checks arrive in.
-func (s Step) verified() bool {
-	return s.LedgerSHA != "" && slices.ContainsFunc(s.Checks, func(c StorageCheck) bool { return c.SHA == s.LedgerSHA })
-}
-
-func (s Step) latestCheck() (StorageCheck, bool) {
-	if len(s.Checks) == 0 {
-		return StorageCheck{}, false
+// mayAttempt: attempt n is the next one, the step is still to be decided, and
+// no attempt is in flight. A read whose data was lost is not in flight: it is
+// re-read alongside it (D4).
+func (s Step) mayAttempt(n int) bool {
+	if s.Cancelled || s.GaveUp != "" || s.Decided > 0 || n != len(s.Attempts)+1 {
+		return false
 	}
-	return slices.MaxFunc(s.Checks, func(a, b StorageCheck) int { return a.At.Compare(b.At) }), true
+	if a := s.current(); a != nil {
+		switch a.phase(s.ProducesData) {
+		case PhaseDispatched, PhaseClaimed, PhaseRunning, PhaseStoring:
+			return false
+		}
+	}
+	return true
 }
 
-// Phase is what the evidence supports, falling back to intent when there is none.
+func (s Step) current() *Attempt {
+	if len(s.Attempts) == 0 {
+		return nil
+	}
+	return &s.Attempts[len(s.Attempts)-1]
+}
+
+func (s Step) attempt(jobID string) *Attempt {
+	for i := range s.Attempts {
+		if s.Attempts[i].JobID == jobID {
+			return &s.Attempts[i]
+		}
+	}
+	return nil
+}
+
+// claimed: the driver may run this job. A claim granted stays granted, even
+// after a cancel (D1).
+func (s Step) claimed(jobID string) bool {
+	a := s.attempt(jobID)
+	return a != nil && a.Claimed
+}
+
+// JobID is the latest attempt's job, the one commands are sent for.
+func (s Step) JobID() string {
+	if a := s.current(); a != nil {
+		return a.JobID
+	}
+	return ""
+}
+
+// open is the latest attempt that may still change how the step ends.
+func (s Step) open() *Attempt {
+	for i := len(s.Attempts) - 1; i >= 0; i-- {
+		a := &s.Attempts[i]
+		if a.open(s.ProducesData) {
+			return a
+		}
+	}
+	return nil
+}
+
+// shown is the attempt the step's times and error come from: the one that
+// decided it, else the open one, else the latest that ran.
+func (s Step) shown() *Attempt {
+	if s.Decided > 0 {
+		return &s.Attempts[s.Decided-1]
+	}
+	if a := s.open(); a != nil {
+		return a
+	}
+	for i := len(s.Attempts) - 1; i >= 0; i-- {
+		if s.Attempts[i].ran() {
+			return &s.Attempts[i]
+		}
+	}
+	return s.current()
+}
+
+// Phase is what the evidence of all attempts supports, falling back to intent
+// when there is none.
 func (s Step) Phase() Phase {
-	if s.Reason() != "" {
+	switch {
+	case s.Decided > 0:
+		// Two outcomes reported for the job that decided: the evidence
+		// contradicts itself, so the completion is not claimed.
+		if s.Attempts[s.Decided-1].Conflict != "" {
+			return PhaseUnresolved
+		}
+		return PhaseCompleted
+	case !slices.ContainsFunc(s.Attempts, Attempt.ran) && s.Cancelled:
+		return PhaseCancelled
+	case len(s.Attempts) == 0:
+		return PhasePending
+	}
+	if a := s.open(); a != nil {
+		p := a.phase(s.ProducesData)
+		if p == PhaseDispatched && a.N > 1 {
+			return PhaseRetrying
+		}
+		return p
+	}
+	if s.GaveUp != "" || s.Cancelled {
+		return PhaseFailed
+	}
+	return PhaseEnded
+}
+
+// Times are the ledger's times of the attempt shown.
+func (s Step) Times() (started, finished *time.Time) {
+	if a := s.shown(); a != nil {
+		return a.StartedAt, a.FinishedAt
+	}
+	return nil, nil
+}
+
+// whyNoMore says why a failed step will not be tried again.
+func (s Step) whyNoMore() string {
+	if s.GaveUp != "" {
+		return s.GaveUp
+	}
+	return "not retried: cancelled"
+}
+
+func (a Attempt) ran() bool { return a.Claimed || a.hasEvidence() }
+
+func (a Attempt) hasEvidence() bool {
+	return a.StartedAt != nil || a.Outcome != "" || len(a.Checks) > 0 || a.DataLost
+}
+
+// ended: the instrument has said how it ended, and the step cannot learn more
+// from it. A hang is ended too: after the ledger says hung, nothing follows.
+func (a Attempt) ended() bool {
+	return a.Conflict == "" && (a.Outcome == OutcomeFailed || a.Outcome == OutcomeHung)
+}
+
+func (a Attempt) open(producesData bool) bool {
+	switch a.phase(producesData) {
+	case PhaseCancelled, PhaseCompleted:
+		return false
+	}
+	return !a.ended()
+}
+
+func (a Attempt) phase(producesData bool) Phase {
+	if a.reason(producesData) != "" {
 		return PhaseUnresolved
 	}
-	switch s.Outcome {
+	switch a.Outcome {
 	case OutcomeFailed:
 		return PhaseFailed
 	case OutcomeCompleted:
-		if !s.ProducesData || s.verified() {
+		if !producesData || a.verified() {
 			return PhaseCompleted
 		}
 		return PhaseStoring
 	}
 	switch {
-	case s.hasEvidence():
+	case a.hasEvidence():
 		return PhaseRunning
-	case s.Cancelled:
+	case a.Cancelled:
 		return PhaseCancelled
-	case s.Claimed:
+	case a.Claimed:
 		return PhaseClaimed
-	case s.JobID != "":
-		return PhaseDispatched
 	}
-	return PhasePending
+	return PhaseDispatched
 }
 
-// Reason says why the evidence is not enough to resolve the step, or "" if it is.
-func (s Step) Reason() string {
-	read := s.Outcome == OutcomeCompleted && s.ProducesData
+// verified: some read-back of storage matched what the instrument measured.
+// Once true it stays true, whatever order the checks arrive in.
+func (a Attempt) verified() bool {
+	return a.LedgerSHA != "" && slices.ContainsFunc(a.Checks, func(c StorageCheck) bool { return c.SHA == a.LedgerSHA })
+}
+
+func (a Attempt) latestCheck() (StorageCheck, bool) {
+	if len(a.Checks) == 0 {
+		return StorageCheck{}, false
+	}
+	return slices.MaxFunc(a.Checks, func(x, y StorageCheck) int { return x.At.Compare(y.At) }), true
+}
+
+// reason says why the evidence is not enough to resolve the attempt, or "" if it is.
+func (a Attempt) reason(producesData bool) string {
+	read := a.Outcome == OutcomeCompleted && producesData
 	switch {
-	case s.Conflict != "":
-		return s.Conflict
-	case s.Outcome == OutcomeHung:
+	case a.Conflict != "":
+		return a.Conflict
+	case a.Outcome == OutcomeHung:
 		return "instrument hung; outcome unknown"
-	case read && s.LedgerSHA == "":
+	case read && a.LedgerSHA == "":
 		return "instrument reported no digest for its data"
-	case read && s.DataLost && !s.verified():
+	case read && a.DataLost && !a.verified():
 		// Not failed: an upload sent before the driver lost the bytes can still
 		// land, and storage cannot refuse it (D3). Only storage showing the data,
 		// or a decision, settles it.
 		msg := "driver lost the data before it was confirmed stored; an earlier upload may still appear in storage"
-		if len(s.Checks) > 0 {
+		if len(a.Checks) > 0 {
 			msg += "; the stored object does not match what the instrument measured"
 		}
 		return msg
-	case read && len(s.Checks) > 0 && !s.verified():
+	case read && len(a.Checks) > 0 && !a.verified():
 		return "stored data does not match what the instrument measured"
 	}
 	return ""
 }
 
-func (s Step) failure() string { return s.InstrumentError }
+// failure is how an ended attempt ended.
+func (a Attempt) failure() string {
+	if a.Outcome == OutcomeHung {
+		return "instrument hung; outcome unknown"
+	}
+	return a.InstrumentError
+}
 
 // warning: a verified completion is never undone, but a later read-back that
 // no longer matches is reported.
-func (s Step) warning() string {
-	if c, ok := s.latestCheck(); ok && s.verified() && c.SHA != s.LedgerSHA {
+func (a Attempt) warning() string {
+	if c, ok := a.latestCheck(); ok && a.verified() && c.SHA != a.LedgerSHA {
 		return fmt.Sprintf("stored data no longer matches what the instrument measured (checked %s)", c.At.Format(time.RFC3339))
 	}
 	return ""
@@ -233,7 +419,7 @@ func (p Phase) APIStatus() string {
 	switch p {
 	case PhaseDispatched:
 		return StepPending
-	case PhaseClaimed, PhaseRunning, PhaseStoring, PhaseUnresolved:
+	case PhaseRetrying, PhaseClaimed, PhaseRunning, PhaseStoring, PhaseUnresolved, PhaseEnded:
 		return StepRunning
 	}
 	return string(p)
@@ -249,14 +435,20 @@ func (p Phase) SchedulerStatus() string {
 }
 
 func (s Step) APIError() *string {
+	a := s.shown()
+	if a == nil {
+		return nil
+	}
 	var msg string
 	switch s.Phase() {
 	case PhaseUnresolved:
-		msg = s.Reason()
+		msg = a.reason(s.ProducesData)
+	case PhaseEnded:
+		msg = a.failure()
 	case PhaseFailed:
-		msg = s.failure()
+		msg = a.failure() + "; " + s.whyNoMore()
 	case PhaseCompleted:
-		msg = s.warning()
+		msg = a.warning()
 	}
 	if msg == "" {
 		return nil
@@ -264,13 +456,13 @@ func (s Step) APIError() *string {
 	return &msg
 }
 
-// APIDataRef is set once the stored data has been verified against the ledger,
-// and stays set: a later mismatch is reported in the error, not by hiding where
-// the data is.
+// APIDataRef is set once the deciding attempt's data has been verified against
+// the ledger, and stays set: a later mismatch is reported in the error, not by
+// hiding where the data is.
 func (s Step) APIDataRef() *string {
 	if !s.ProducesData || s.Phase() != PhaseCompleted {
 		return nil
 	}
-	c, _ := s.latestCheck()
+	c, _ := s.Attempts[s.Decided-1].latestCheck()
 	return &c.Ref
 }

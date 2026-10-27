@@ -97,7 +97,7 @@ func (e *Executor) advance(ctx context.Context, runID string, dispatched map[str
 		}
 		for i := range steps {
 			if steps[i].name == name {
-				steps[i].phase, steps[i].jobID = s.Phase(), s.JobID
+				steps[i].phase, steps[i].jobID = s.Phase(), s.JobID()
 			}
 		}
 	}
@@ -106,10 +106,18 @@ func (e *Executor) advance(ctx context.Context, runID string, dispatched map[str
 	for _, s := range steps {
 		switch s.phase {
 		case PhasePending, PhaseCompleted, PhaseFailed, PhaseCancelled:
-		case PhaseDispatched:
+		case PhaseDispatched, PhaseRetrying:
 			inFlight = true
 			dispatched[s.jobID] = true
 			e.send(ctx, runID, s)
+		case PhaseEnded:
+			// Every attempt ended without success. Nothing repeats one yet, so
+			// no further attempt will be made (D4; retries are the policy slice).
+			inFlight = true
+			if _, _, err := e.applyToStep(ctx, runID, s.name, GaveUp{Reason: "not repeated"}); err != nil {
+				return fmt.Errorf("give up %s: %w", s.name, err)
+			}
+			e.poke()
 		default:
 			inFlight = true
 		}

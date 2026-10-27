@@ -284,3 +284,19 @@ func keys(m map[string]any) []string {
 	slices.Sort(out)
 	return out
 }
+
+// A step stored in an older shape is refused, not misread (K10): read as the
+// new shape, a v1 step has no attempts, looks pending and would be dispatched
+// again.
+func TestStoreRefusesAnOlderLifecycle(t *testing.T) {
+	e := NewExecutor(testDB(t), nil, nil)
+	rv := newRun(t, e)
+	if _, err := e.db.Exec(`UPDATE steps SET lifecycle = $1 WHERE run_id = $2 AND name = 'fill'`,
+		`{"ProducesData": false, "JobID": "`+rv.ID+`/fill/1", "Attempt": 1, "Claimed": true}`, rv.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := e.applyToStep(context.Background(), rv.ID, "fill", Dispatched{JobID: rv.ID + "/fill/1", Attempt: 1})
+	if err == nil || !strings.Contains(err.Error(), "lifecycle v0") {
+		t.Fatalf("applying to a v1 step: err = %v, want a refusal naming its version", err)
+	}
+}

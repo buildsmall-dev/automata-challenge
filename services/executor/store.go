@@ -46,9 +46,9 @@ func (e *Executor) apply(ctx context.Context, where string, args []any, f Fact) 
 	if err != nil {
 		return Step{}, false, fmt.Errorf("load step %v: %w", args, err)
 	}
-	var s Step
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return Step{}, false, fmt.Errorf("decode step %s/%s: %w", runID, name, err)
+	s, err := decodeStep(raw)
+	if err != nil {
+		return Step{}, false, fmt.Errorf("step %s/%s: %w", runID, name, err)
 	}
 
 	s, changed := Apply(s, f)
@@ -70,19 +70,33 @@ func saveStep(ctx context.Context, tx *sql.Tx, runID, name string, s Step) error
 		return fmt.Errorf("encode step %s/%s: %w", runID, name, err)
 	}
 	var jobID *string
-	if s.JobID != "" {
-		jobID = &s.JobID
+	if j := s.JobID(); j != "" {
+		jobID = &j
 	}
 	phase := s.Phase()
+	started, finished := s.Times()
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE steps SET lifecycle = $3, phase = $4, job_id = $5,
 		        status = $6, started_at = $7, finished_at = $8, error = $9, data_ref = $10
 		  WHERE run_id = $1 AND name = $2`,
 		runID, name, raw, phase, jobID,
-		phase.APIStatus(), s.StartedAt, s.FinishedAt, s.APIError(), s.APIDataRef()); err != nil {
+		phase.APIStatus(), started, finished, s.APIError(), s.APIDataRef()); err != nil {
 		return fmt.Errorf("save step %s/%s: %w", runID, name, err)
 	}
 	return nil
+}
+
+// decodeStep reads a stored step, refusing any shape but the current one: read
+// as the new shape, an older step would lose its attempts and be sent again.
+func decodeStep(raw []byte) (Step, error) {
+	var s Step
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return Step{}, fmt.Errorf("decode: %w", err)
+	}
+	if s.V != lifecycleVersion {
+		return Step{}, fmt.Errorf("stored as lifecycle v%d, want v%d; local data from an older build must be reset (docker compose down -v)", s.V, lifecycleVersion)
+	}
+	return s, nil
 }
 
 // producesData: which devices hand back data that must be stored. Only the

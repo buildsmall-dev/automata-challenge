@@ -101,7 +101,7 @@ func (e *Executor) onClaim(m *nats.Msg) {
 	case err != nil:
 		log.Printf("executor: claim of %s by %s: %v; not answering", req.JobID, req.Device, err)
 		return
-	case s.Claimed && !s.Cancelled:
+	case s.claimed(req.JobID):
 		reply.Result = protocol.ClaimGo
 	default:
 		reply.Reason = "cancelled"
@@ -215,34 +215,45 @@ func (e *Executor) recheckLost(ctx context.Context) {
 		return
 	}
 	rows, err := e.db.QueryContext(ctx,
-		`SELECT job_id, device_id, lifecycle FROM steps WHERE phase = $1 AND lifecycle->>'DataLost' = 'true'`, PhaseUnresolved)
+		`SELECT run_id, name, lifecycle FROM steps WHERE phase = $1`, PhaseUnresolved)
 	if err != nil {
 		log.Printf("executor: list reads reported lost: %v", err)
 		return
 	}
 	type lost struct {
-		job, device string
-		step        Step
+		run, name string
+		attempt   Attempt
 	}
 	var reads []lost
 	for rows.Next() {
-		var l lost
+		var run, name string
 		var raw []byte
-		if rows.Scan(&l.job, &l.device, &raw) == nil && json.Unmarshal(raw, &l.step) == nil {
-			reads = append(reads, l)
+		if rows.Scan(&run, &name, &raw) != nil {
+			continue
+		}
+		s, err := decodeStep(raw)
+		if err != nil {
+			log.Printf("executor: recheck %s/%s: %v", run, name, err)
+			continue
+		}
+		for _, a := range s.Attempts {
+			if a.DataLost && !a.verified() {
+				reads = append(reads, lost{run, name, a})
+			}
 		}
 	}
 	rows.Close()
 	for _, l := range reads {
-		ds, err := e.readBack(ctx, l.job)
+		ds, err := e.readBack(ctx, l.attempt.JobID)
 		if err != nil {
 			continue // still absent, or storage is not answering: nothing new
 		}
-		if slices.ContainsFunc(l.step.Checks, func(c StorageCheck) bool { return c.SHA == ds.SHA }) {
+		if slices.ContainsFunc(l.attempt.Checks, func(c StorageCheck) bool { return c.SHA == ds.SHA }) {
 			continue // the same object as last time
 		}
-		if _, changed, err := e.applyToJob(ctx, l.device, l.job, ds); err != nil {
-			log.Printf("executor: recheck of %s: %v", l.job, err)
+		// By step, not by job: our own read-back may be for an earlier attempt.
+		if _, changed, err := e.applyToStep(ctx, l.run, l.name, ds); err != nil {
+			log.Printf("executor: recheck of %s: %v", l.attempt.JobID, err)
 		} else if changed {
 			e.poke()
 		}
