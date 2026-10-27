@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -28,24 +29,26 @@ type fakeDriver struct {
 	js     jetstream.JetStream
 	device string
 
-	mu      sync.Mutex
-	busy    int                  // reply busy to this many commands first
-	drop    int                  // accept but send no reply to this many commands
-	outcome map[string]string    // step -> ledger outcome; default completed
-	ledger  map[string]int       // job -> times it physically ran
-	cmds    map[string]int       // job -> commands received
-	running bool                 // one job at a time, like the instrument
-	at      map[string]time.Time // job -> ledger finished_at
-	sha     map[string]string    // step -> ledger data_sha256
-	lose    map[string]bool      // step -> report its data lost after finishing
-	sub     *nats.Subscription
+	mu        sync.Mutex
+	busy      int                  // reply busy to this many commands first
+	drop      int                  // accept but send no reply to this many commands
+	outcome   map[string]string    // job or step -> ledger outcome; default completed
+	ledger    map[string]int       // job -> times it physically ran
+	cmds      map[string]int       // job -> commands received
+	attempt   map[string]int       // job -> the attempt its last command said
+	running   bool                 // one job at a time, like the instrument
+	at        map[string]time.Time // job -> ledger finished_at
+	sha       map[string]string    // job or step -> ledger data_sha256
+	lose      map[string]bool      // job or step -> report its data lost after finishing
+	retryable map[string]bool      // job or step -> a failure the instrument says may be repeated
+	sub       *nats.Subscription
 }
 
 func newFakeDriver(t *testing.T, nc *nats.Conn, device string) *fakeDriver {
 	js, _ := jetstream.New(nc)
 	d := &fakeDriver{t: t, nc: nc, js: js, device: device,
-		outcome: map[string]string{}, ledger: map[string]int{}, cmds: map[string]int{}, at: map[string]time.Time{},
-		sha: map[string]string{}, lose: map[string]bool{}}
+		outcome: map[string]string{}, ledger: map[string]int{}, cmds: map[string]int{}, attempt: map[string]int{},
+		at: map[string]time.Time{}, sha: map[string]string{}, lose: map[string]bool{}, retryable: map[string]bool{}}
 	return d
 }
 
@@ -67,6 +70,7 @@ func (d *fakeDriver) onRun(m *nats.Msg) {
 	}
 	d.mu.Lock()
 	d.cmds[cmd.JobID]++
+	d.attempt[cmd.JobID] = cmd.Attempt
 	result, reply := protocol.RunAccepted, true
 	switch {
 	case d.ledger[cmd.JobID] > 0:
@@ -109,14 +113,14 @@ func (d *fakeDriver) execute(cmd protocol.RunCommand) {
 	start := time.Now().UTC()
 	end := start.Add(10 * time.Millisecond)
 	d.mu.Lock()
-	outcome, sha, lose := d.outcome[cmd.Step], d.sha[cmd.Step], d.lose[cmd.Step]
+	outcome, sha, lose, retryable := forJob(d.outcome, cmd), forJob(d.sha, cmd), forJob(d.lose, cmd), forJob(d.retryable, cmd)
 	d.at[cmd.JobID] = end
 	d.mu.Unlock()
 	if outcome == "" {
 		outcome = "completed"
 	}
 	d.publish(protocol.Event{Kind: protocol.KindStarted, JobID: cmd.JobID, StartedAt: &start})
-	d.publish(protocol.Event{Kind: protocol.KindFinished, JobID: cmd.JobID, Outcome: outcome, StartedAt: &start, FinishedAt: &end, SHA: sha})
+	d.publish(protocol.Event{Kind: protocol.KindFinished, JobID: cmd.JobID, Outcome: outcome, StartedAt: &start, FinishedAt: &end, SHA: sha, Retryable: retryable && outcome == "failed"})
 	if lose {
 		d.publish(protocol.Event{Kind: protocol.KindDataLost, JobID: cmd.JobID})
 	}
@@ -129,6 +133,14 @@ func (d *fakeDriver) publish(ev protocol.Event) {
 		jetstream.WithMsgID(protocol.MsgID(ev.JobID, ev.Kind))); err != nil {
 		d.t.Errorf("%s: publish: %v", d.device, err)
 	}
+}
+
+// forJob is what m says for this job, or else for its step.
+func forJob[V any](m map[string]V, cmd protocol.RunCommand) V {
+	if v, ok := m[cmd.JobID]; ok {
+		return v
+	}
+	return m[cmd.Step]
 }
 
 func (d *fakeDriver) ran(jobID string) int { d.mu.Lock(); defer d.mu.Unlock(); return d.ledger[jobID] }
@@ -290,8 +302,8 @@ func phaseOf(t *testing.T, e *Executor, runID, name string) Phase {
 	return p
 }
 
-// Nothing repeats a hang yet, so a hung step ends failed with the reason, and
-// so does its run (D4). Before D4 it stayed running for ever.
+// The incubator is not safe to repeat, so a hung incubation ends failed with
+// the reason, and so does its run (D4). Before D4 it stayed running for ever.
 func TestHungStepFailsItsRun(t *testing.T) {
 	h := newHarness(t)
 	lh, inc := h.drivers()
@@ -299,10 +311,91 @@ func TestHungStepFailsItsRun(t *testing.T) {
 	rv := h.startRun(sendWorkflow)
 	h.waitRun(rv.ID, RunFailed, 10*time.Second)
 	sv := stepView(t, h.e, rv.ID, "incubate")
-	if sv.Status != StepFailed || sv.Error == nil || *sv.Error != "instrument hung; outcome unknown; not repeated" {
-		t.Errorf("incubate: %s, %v; want failed, instrument hung; outcome unknown; not repeated", sv.Status, sv.Error)
+	if sv.Status != StepFailed || sv.Error == nil || *sv.Error != "instrument hung; outcome unknown; not repeated: incubator-1 is not safe to repeat" {
+		t.Errorf("incubate: %s, %v; want failed, and why it was not repeated", sv.Status, sv.Error)
 	}
 	if n := lh.commands(protocol.JobID(rv.ID, "wash", 1)); n != 0 {
 		t.Errorf("wash was commanded %d times after incubate failed", n)
+	}
+}
+
+// D4: a failure the instrument marks retryable gets a new attempt, as its own
+// job, and the command says which attempt it is (K47).
+func TestRetryableFailureIsRetried(t *testing.T) {
+	h := newHarness(t)
+	_, inc := h.drivers()
+	rv := h.startRun(sendWorkflow)
+	first, second := protocol.JobID(rv.ID, "incubate", 1), protocol.JobID(rv.ID, "incubate", 2)
+	inc.outcome[first], inc.retryable["incubate"] = "failed", true
+
+	h.waitRun(rv.ID, RunCompleted, 10*time.Second)
+	if inc.ran(first) != 1 || inc.ran(second) != 1 {
+		t.Errorf("incubate attempts ran %d and %d times, want once each", inc.ran(first), inc.ran(second))
+	}
+	inc.mu.Lock()
+	defer inc.mu.Unlock()
+	if inc.attempt[second] != 2 {
+		t.Errorf("command for %s said attempt %d, want 2", second, inc.attempt[second])
+	}
+}
+
+// At most three attempts: then the step fails and says so.
+func TestRetriesStopAtTheLimit(t *testing.T) {
+	h := newHarness(t)
+	_, inc := h.drivers()
+	inc.outcome["incubate"], inc.retryable["incubate"] = "failed", true
+	rv := h.startRun(sendWorkflow)
+	h.waitRun(rv.ID, RunFailed, 10*time.Second)
+	if sv := stepView(t, h.e, rv.ID, "incubate"); sv.Error == nil || !strings.Contains(*sv.Error, "not repeated: 3 attempts made") {
+		t.Errorf("incubate error = %v, want it to say 3 attempts were made", sv.Error)
+	}
+	for n := 1; n <= 3; n++ {
+		if got := inc.ran(protocol.JobID(rv.ID, "incubate", n)); got != 1 {
+			t.Errorf("attempt %d ran %d times, want 1", n, got)
+		}
+	}
+	if n := inc.commands(protocol.JobID(rv.ID, "incubate", 4)); n != 0 {
+		t.Errorf("a fourth attempt was commanded %d times", n)
+	}
+}
+
+// A hang is repeated only on a device configured safe to repeat (D4).
+func TestHangIsRepeatedOnlyWhereSafe(t *testing.T) {
+	h := newHarness(t)
+	h.e.policy.RepeatSafe = []string{"incubator"}
+	_, inc := h.drivers()
+	rv := h.startRun(sendWorkflow)
+	inc.outcome[protocol.JobID(rv.ID, "incubate", 1)] = "hung"
+	h.waitRun(rv.ID, RunCompleted, 10*time.Second)
+	if inc.ran(protocol.JobID(rv.ID, "incubate", 2)) != 1 {
+		t.Errorf("hung incubate was not repeated on a repeat-safe incubator")
+	}
+}
+
+// A read whose data was lost is read again; the re-read decides the step, and
+// the lost read stays in the history (D3, D4).
+func TestLostReadIsReadAgain(t *testing.T) {
+	h := newHarness(t, testStorage(t))
+	newFakeDriver(t, h.nc, "liquid-handler-1").serve()
+	pr := newFakeDriver(t, h.nc, "plate-reader-1").serve()
+	data := []byte("plate " + randomHex(4))
+	pr.sha["read_plate"] = digest(data)
+	rv := h.startRun(testWorkflow)
+	first, second := protocol.JobID(rv.ID, "read_plate", 1), protocol.JobID(rv.ID, "read_plate", 2)
+	pr.lose[first] = true
+
+	for deadline := time.Now().Add(10 * time.Second); pr.ran(second) == 0; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("lost read was not read again; step %+v", stepView(t, h.e, rv.ID, "read_plate"))
+		}
+	}
+	h.waitStep(rv.ID, "read_plate", StepRunning) // storing: the driver has not stored it yet
+	h.put(second, data)
+	h.stored(second, h.e.storage.Ref(protocol.DataKey(second)))
+	done := h.waitRun(rv.ID, RunCompleted, 10*time.Second)
+	for _, s := range done.Steps {
+		if s.Name == "read_plate" && (s.DataRef == nil || !strings.HasSuffix(*s.DataRef, protocol.DataKey(second))) {
+			t.Errorf("read_plate data_ref = %v, want the re-read's object", s.DataRef)
+		}
 	}
 }

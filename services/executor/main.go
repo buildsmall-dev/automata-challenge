@@ -71,6 +71,10 @@ func main() {
 	defer stop()
 
 	executor := NewExecutor(db, nc, st)
+	if executor.policy, err = PolicyFromEnv(os.LookupEnv); err != nil {
+		log.Fatalf("retry policy: %v", err)
+	}
+	log.Printf("executor: retry policy %+v", executor.policy)
 	if err := executor.Start(ctx); err != nil {
 		log.Fatalf("executor start: %v", err)
 	}

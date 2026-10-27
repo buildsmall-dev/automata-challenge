@@ -110,14 +110,19 @@ func (e *Executor) advance(ctx context.Context, runID string, dispatched map[str
 			inFlight = true
 			dispatched[s.jobID] = true
 			e.send(ctx, runID, s)
-		case PhaseEnded:
-			// Every attempt ended without success. Nothing repeats one yet, so
-			// no further attempt will be made (D4; retries are the policy slice).
+		case PhaseEnded, PhaseUnresolved:
+			// The latest attempt ended without success, or its data was lost:
+			// try again or give up, as D4 allows (policy.go).
 			inFlight = true
-			if _, _, err := e.applyToStep(ctx, runID, s.name, GaveUp{Reason: "not repeated"}); err != nil {
-				return fmt.Errorf("give up %s: %w", s.name, err)
+			_, changed, err := e.decideStep(ctx, runID, s.name, func(st Step) Fact {
+				return e.policy.next(runID, s.name, s.device, st)
+			})
+			if err != nil {
+				return fmt.Errorf("decide %s: %w", s.name, err)
 			}
-			e.poke()
+			if changed {
+				e.poke()
+			}
 		default:
 			inFlight = true
 		}
@@ -203,7 +208,8 @@ func (e *Executor) send(ctx context.Context, runID string, s stepRow) {
 }
 
 func (e *Executor) command(ctx context.Context, runID string, s stepRow) time.Duration {
-	b, _ := json.Marshal(protocol.NewRunCommand(runID, s.name, 1))
+	_, _, attempt, _ := protocol.ParseJobID(s.jobID)
+	b, _ := json.Marshal(protocol.NewRunCommand(runID, s.name, attempt))
 	rctx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 	msg, err := e.nc.RequestWithContext(rctx, protocol.RunSubject(s.device), b)
