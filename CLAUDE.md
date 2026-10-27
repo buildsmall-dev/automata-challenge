@@ -76,7 +76,7 @@ For each message or state transition, answer:
 docker compose up --build -d                       # whole stack
 docker compose up --build -d executor liquid-handler-1 incubator-1 plate-reader-1
 docker compose down -v                             # after db/init.sql changes
-go test ./...                                      # unit tests
+go test -race ./...                                # unit tests, with the race detector
 ./scripts/acceptance.sh                            # happy-path floor
 ./scripts/chaos.sh random --seed 7 --for 60        # see README "Breaking things"
 ```
