@@ -41,6 +41,7 @@ type fakeDriver struct {
 	sha       map[string]string    // job or step -> ledger data_sha256
 	lose      map[string]bool      // job or step -> report its data lost after finishing
 	retryable map[string]bool      // job or step -> a failure the instrument says may be repeated
+	stall     map[string]bool      // job or step -> claim it, then never start it (a driver that died)
 	sub       *nats.Subscription
 }
 
@@ -48,7 +49,7 @@ func newFakeDriver(t *testing.T, nc *nats.Conn, device string) *fakeDriver {
 	js, _ := jetstream.New(nc)
 	d := &fakeDriver{t: t, nc: nc, js: js, device: device,
 		outcome: map[string]string{}, ledger: map[string]int{}, cmds: map[string]int{}, attempt: map[string]int{},
-		at: map[string]time.Time{}, sha: map[string]string{}, lose: map[string]bool{}, retryable: map[string]bool{}}
+		at: map[string]time.Time{}, sha: map[string]string{}, lose: map[string]bool{}, retryable: map[string]bool{}, stall: map[string]bool{}}
 	return d
 }
 
@@ -108,6 +109,12 @@ func (d *fakeDriver) execute(cmd protocol.RunCommand) {
 	}
 	var claim protocol.ClaimReply
 	if protocol.Decode(msg.Data, &claim); claim.Result != protocol.ClaimGo {
+		return
+	}
+	d.mu.Lock()
+	stall := forJob(d.stall, cmd)
+	d.mu.Unlock()
+	if stall {
 		return
 	}
 	start := time.Now().UTC()
