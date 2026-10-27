@@ -146,7 +146,7 @@ func (e *Executor) finish(ctx context.Context, runID string, steps []stepRow) er
 	completed, failed, cancelled, last := true, false, false, time.Time{}
 	for _, s := range steps {
 		completed = completed && s.phase == PhaseCompleted
-		failed = failed || (s.phase == PhaseFailed && s.step.GaveUp != "")
+		failed = failed || (s.phase == PhaseFailed && s.step.GaveUp != CancelledReason)
 		cancelled = cancelled || s.step.Cancelled
 		if s.finishedAt != nil && s.finishedAt.After(last) {
 			last = *s.finishedAt

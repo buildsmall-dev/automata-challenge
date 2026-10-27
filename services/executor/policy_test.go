@@ -60,7 +60,14 @@ func TestNextAttempt(t *testing.T) {
 			append(lost1, dispatchN(2), claimN(2), retryableN(2)), again(3)},
 		{"a re-read that failed for good: nothing to give up while the lost read is open", "plate-reader-1", reader,
 			append(lost1, dispatchN(2), claimN(2), ranN(2, OutcomeFailed, "")), nil},
-		{"cancelled: nothing", "incubator-1", Step{}, []Fact{dispatchN(1), claimN(1), failedRetryable, Cancel{}}, nil},
+		{"cancelled after a retryable failure: give up, the cancel is why", "incubator-1", Step{}, []Fact{dispatchN(1), claimN(1), failedRetryable, Cancel{}},
+			GaveUp{Reason: CancelledReason}},
+		{"cancelled after a final failure: give up with its own reason", "liquid-handler-1", Step{}, []Fact{dispatchN(1), claimN(1), ranN(1, OutcomeFailed, ""), Cancel{}},
+			giveUp("the instrument did not mark the failure retryable")},
+		{"cancelled with the retry withdrawn: the attempt that ran is judged", "incubator-1", Step{},
+			[]Fact{dispatchN(1), claimN(1), failedRetryable, dispatchN(2), claimN(2), Cancel{}, claimN(2)}, GaveUp{Reason: CancelledReason}},
+		{"cancelled while in flight: nothing yet", "incubator-1", Step{}, []Fact{dispatchN(1), claimN(1), Cancel{}}, nil},
+		{"cancelled with a lost read open: nothing, it stays open", "plate-reader-1", reader, append(lost1, Cancel{}), nil},
 		{"in flight: nothing", "incubator-1", Step{}, []Fact{dispatchN(1), claimN(1)}, nil},
 		{"completed: nothing", "incubator-1", Step{}, []Fact{dispatchN(1), claimN(1), ranN(1, OutcomeCompleted, "")}, nil},
 		{"two outcomes reported: nothing", "incubator-1", Step{}, []Fact{dispatchN(1), claimN(1), failedRetryable, ranN(1, OutcomeCompleted, "")}, nil},
@@ -73,5 +80,25 @@ func TestNextAttempt(t *testing.T) {
 				t.Errorf("next = %#v, want %#v", got, c.want)
 			}
 		})
+	}
+}
+
+// Codex P2 on the cancel slice: a cancel that lands before the policy has
+// decided must not relabel a failure that was final anyway. The cancel stops new
+// attempts; it is named as the reason only when an attempt would have been made.
+func TestACancelDoesNotRelabelAFinalFailure(t *testing.T) {
+	final := applyAll(Step{}, dispatchN(1), claimN(1), ranN(1, OutcomeFailed, ""), Cancel{})
+	if p := final.Phase(); p != PhaseEnded {
+		t.Fatalf("cancelled before the decision: phase %s, want ended (the policy decides why)", p)
+	}
+	got := defaultPolicy.next("run-1", "read_plate", "liquid-handler-1", final)
+	if want := (GaveUp{Reason: "not repeated: the instrument did not mark the failure retryable"}); got != want {
+		t.Errorf("final failure, then a cancel: %#v, want %#v", got, want)
+	}
+	retryable := ranN(1, OutcomeFailed, "")
+	retryable.Retryable = true
+	stopped := applyAll(Step{}, dispatchN(1), claimN(1), retryable, Cancel{})
+	if got := defaultPolicy.next("run-1", "read_plate", "incubator-1", stopped); got != (GaveUp{Reason: CancelledReason}) {
+		t.Errorf("retryable failure, then a cancel: %#v, want the cancel named", got)
 	}
 }

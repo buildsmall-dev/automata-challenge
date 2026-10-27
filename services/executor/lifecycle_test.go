@@ -386,12 +386,16 @@ func TestAStepIsDecidedByAllItsAttempts(t *testing.T) {
 			PhaseCompleted, "", "", 1},
 
 		// Cancel, as D1 has it, across attempts.
-		{"cancel after a failed attempt: failed, not retried", Step{}, then(attempt1Failed, Cancel{}),
+		// After a cancel the policy still says why there is no other attempt (D5,
+		// TestACancelDoesNotRelabelAFinalFailure); until it has, the step is ended.
+		{"cancel after a failed attempt: ended until the policy decides", Step{}, then(attempt1Failed, Cancel{}),
+			PhaseEnded, "instrument error", "", 1},
+		{"cancelled, and the cancel is why: failed, not retried", Step{}, then(attempt1Failed, Cancel{}, GaveUp{Reason: CancelledReason}),
 			PhaseFailed, "instrument error; not retried: cancelled", "", 1},
 		{"cancel wins over the retry's claim; the attempt that ran still shows", Step{}, then(attempt1Failed, dispatchN(2), Cancel{}, claimN(2)),
-			PhaseFailed, "instrument error; not retried: cancelled", "", 2},
+			PhaseEnded, "instrument error", "", 2},
 		{"no new attempt after a cancel", Step{}, []Fact{dispatchN(1), claimN(1), Cancel{}, ranN(1, OutcomeFailed, ""), dispatchN(2)},
-			PhaseFailed, "not retried: cancelled", "", 1},
+			PhaseEnded, "instrument error", "", 1},
 		{"a cancel never undoes a completion", Step{}, []Fact{dispatchN(1), claimN(1), ranN(1, OutcomeCompleted, ""), Cancel{}},
 			PhaseCompleted, "", "", 1},
 		{"a lost read is not re-read after a cancel, and stays open", reader, then(attempt1Lost, Cancel{}, dispatchN(2)),
@@ -458,8 +462,8 @@ func TestAClaimIsWithdrawnOnlyWhenCancelledAndNeverStarted(t *testing.T) {
 		{"re-claim after a cancel, nothing started: withdrawn, cancelled", []Fact{dispatchN(1), claimN(1), Cancel{}, claimN(1)}, PhaseCancelled, false, jobN(1), ""},
 		{"re-claim after a cancel, but it started: go", []Fact{dispatchN(1), claimN(1), started, Cancel{}, claimN(1)}, PhaseRunning, true, jobN(1), ""},
 		{"evidence after a withdrawal still wins", []Fact{dispatchN(1), claimN(1), Cancel{}, claimN(1), started}, PhaseRunning, false, jobN(1), ""},
-		{"a withdrawn retry: the attempt that ran still decides", []Fact{dispatchN(1), claimN(1), retryable(1), dispatchN(2), claimN(2), Cancel{}, claimN(2)},
-			PhaseFailed, false, jobN(2), "not retried: cancelled"},
+		{"a withdrawn retry: the attempt that ran still shows", []Fact{dispatchN(1), claimN(1), retryable(1), dispatchN(2), claimN(2), Cancel{}, claimN(2)},
+			PhaseEnded, false, jobN(2), "instrument error"},
 		{"a cancel with the claim not yet granted: the claim is refused", []Fact{dispatchN(1), Cancel{}, claimN(1)}, PhaseCancelled, false, jobN(1), ""},
 	}
 	for _, c := range cases {

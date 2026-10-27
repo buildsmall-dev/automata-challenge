@@ -303,7 +303,9 @@ func (s Step) Phase() Phase {
 		}
 		return p
 	}
-	if s.GaveUp != "" || s.Cancelled {
+	// Every attempt has ended. Only the policy says why there is no other, even
+	// after a cancel: it may have been final anyway (D5).
+	if s.GaveUp != "" {
 		return PhaseFailed
 	}
 	return PhaseEnded
@@ -317,13 +319,9 @@ func (s Step) Times() (started, finished *time.Time) {
 	return nil, nil
 }
 
-// whyNoMore says why a failed step will not be tried again.
-func (s Step) whyNoMore() string {
-	if s.GaveUp != "" {
-		return s.GaveUp
-	}
-	return "not retried: cancelled"
-}
+// CancelledReason is why a step is not tried again when the cancel is what
+// stopped it: the policy would have made another attempt (D5).
+const CancelledReason = "not retried: cancelled"
 
 func (a Attempt) ran() bool { return (a.Claimed && !a.Withdrawn) || a.hasEvidence() }
 
@@ -455,7 +453,7 @@ func (s Step) APIError() *string {
 	case PhaseEnded:
 		msg = a.failure()
 	case PhaseFailed:
-		msg = s.whyNoMore()
+		msg = s.GaveUp
 		if f := a.failure(); f != "" {
 			msg = f + "; " + msg
 		}
