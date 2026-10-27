@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -89,10 +90,10 @@ func TestStepLifecycle(t *testing.T) {
 		{"a completed read with no ledger digest is unresolved", reader,
 			[]Fact{dispatched, claimed, ran(OutcomeCompleted, "")}, PhaseUnresolved, "digest", false},
 
-		{"hung is unresolved, not failed", Step{},
-			[]Fact{dispatched, claimed, started, ran(OutcomeHung, "")}, PhaseUnresolved, "hung", false},
-		{"instrument failure is failed", Step{},
-			[]Fact{dispatched, claimed, started, Finished{JobID: job, Outcome: OutcomeFailed, StartedAt: t0, FinishedAt: t1, Error: "instrument error"}},
+		{"hung waits for the retry decision, not failed", Step{},
+			[]Fact{dispatched, claimed, started, ran(OutcomeHung, "")}, PhaseEnded, "hung", false},
+		{"instrument failure, not repeated, is failed", Step{},
+			[]Fact{dispatched, claimed, started, Finished{JobID: job, Outcome: OutcomeFailed, StartedAt: t0, FinishedAt: t1, Error: "instrument error"}, gaveUp},
 			PhaseFailed, "", false},
 		{"two different outcomes for one job are unresolved", Step{},
 			[]Fact{dispatched, claimed, ran(OutcomeCompleted, ""), ran(OutcomeFailed, "")}, PhaseUnresolved, "conflicting", false},
@@ -118,8 +119,8 @@ func TestStepLifecycle(t *testing.T) {
 			if got := s.Phase(); got != c.phase {
 				t.Fatalf("phase = %s, want %s (step %+v)", got, c.phase, s)
 			}
-			if c.reasonHas != "" && !strings.Contains(s.Reason(), c.reasonHas) {
-				t.Errorf("reason = %q, want it to mention %q", s.Reason(), c.reasonHas)
+			if e := s.APIError(); c.reasonHas != "" && (e == nil || !strings.Contains(*e, c.reasonHas)) {
+				t.Errorf("error = %v, want it to mention %q", e, c.reasonHas)
 			}
 			if got := s.APIDataRef() != nil; got != c.hasDataRef {
 				t.Errorf("data_ref present = %v, want %v", got, c.hasDataRef)
@@ -154,15 +155,15 @@ func TestDataLostIsExplained(t *testing.T) {
 	if e := s.APIError(); e == nil || !strings.Contains(*e, "lost") || s.Phase().APIStatus() != StepRunning {
 		t.Errorf("a read reported lost must say so and stay running (unresolved), got %s, %v", s.Phase().APIStatus(), e)
 	}
-	if s.Outcome != OutcomeCompleted {
-		t.Errorf("the instrument's completed outcome must be kept, got %q", s.Outcome)
+	if s.Attempts[0].Outcome != OutcomeCompleted {
+		t.Errorf("the instrument's completed outcome must be kept, got %q", s.Attempts[0].Outcome)
 	}
 }
 
 func TestTimesComeFromTheLedger(t *testing.T) {
-	s := applyAll(Step{}, dispatched, claimed, ran(OutcomeCompleted, ""))
-	if s.StartedAt == nil || !s.StartedAt.Equal(t0) || s.FinishedAt == nil || !s.FinishedAt.Equal(t1) {
-		t.Fatalf("times = %v, %v; want the ledger's %v, %v", s.StartedAt, s.FinishedAt, t0, t1)
+	start, end := applyAll(Step{}, dispatched, claimed, ran(OutcomeCompleted, "")).Times()
+	if start == nil || !start.Equal(t0) || end == nil || !end.Equal(t1) {
+		t.Fatalf("times = %v, %v; want the ledger's %v, %v", start, end, t0, t1)
 	}
 }
 
@@ -186,8 +187,9 @@ func TestEvidenceOrderDoesNotMatter(t *testing.T) {
 	}
 	permute(evidence, func(order []Fact) {
 		got := applyAll(reader, append([]Fact{dispatched}, order...)...)
-		if got.Phase() != want.Phase() || *got.APIDataRef() != *want.APIDataRef() ||
-			!got.StartedAt.Equal(*want.StartedAt) || !got.FinishedAt.Equal(*want.FinishedAt) {
+		gs, ge := got.Times()
+		ws, we := want.Times()
+		if got.Phase() != want.Phase() || *got.APIDataRef() != *want.APIDataRef() || !gs.Equal(*ws) || !ge.Equal(*we) {
 			t.Errorf("order %v ended as %+v, want %+v", typeNames(order), got, want)
 		}
 	})
@@ -214,6 +216,7 @@ func TestEvidenceOrderDoesNotMatter(t *testing.T) {
 func TestAPIView(t *testing.T) {
 	want := map[Phase]string{
 		PhasePending: StepPending, PhaseDispatched: StepPending,
+		PhaseRetrying: StepRunning, PhaseEnded: StepRunning,
 		PhaseClaimed: StepRunning, PhaseRunning: StepRunning, PhaseStoring: StepRunning, PhaseUnresolved: StepRunning,
 		PhaseCompleted: StepCompleted, PhaseFailed: StepFailed, PhaseCancelled: StepCancelled,
 	}
@@ -227,9 +230,9 @@ func TestAPIView(t *testing.T) {
 	if e := hung.APIError(); e == nil || !strings.Contains(*e, "hung") {
 		t.Errorf("unresolved step must say why in error, got %v", e)
 	}
-	failed := applyAll(Step{}, dispatched, claimed, Finished{JobID: job, Outcome: OutcomeFailed, StartedAt: t0, FinishedAt: t1, Error: "instrument error"})
-	if e := failed.APIError(); e == nil || *e != "instrument error" {
-		t.Errorf("failed step must carry the instrument's error, got %v", e)
+	failed := applyAll(Step{}, dispatched, claimed, Finished{JobID: job, Outcome: OutcomeFailed, StartedAt: t0, FinishedAt: t1, Error: "instrument error"}, gaveUp)
+	if e := failed.APIError(); e == nil || *e != "instrument error; not repeated" {
+		t.Errorf("failed step must carry the instrument's error and why it was not repeated, got %v", e)
 	}
 	if e := applyAll(Step{}, dispatched, claimed, started).APIError(); e != nil {
 		t.Errorf("running step has no error, got %q", *e)
@@ -277,15 +280,161 @@ func TestRetryableBelongsToAFailure(t *testing.T) {
 	failed := ran(OutcomeFailed, "")
 	failed.Retryable = true
 	replayed := ran(OutcomeFailed, "")
-	if s := applyAll(Step{}, dispatched, claimed, failed, replayed); !s.Retryable {
+	if s := applyAll(Step{}, dispatched, claimed, failed, replayed); !s.Attempts[0].Retryable {
 		t.Errorf("a retryable failure, then the same failure replayed: Retryable = false")
 	}
-	if s := applyAll(Step{}, dispatched, claimed, replayed, failed); s.Retryable {
+	if s := applyAll(Step{}, dispatched, claimed, replayed, failed); s.Attempts[0].Retryable {
 		t.Errorf("first report said not retryable, a later one cannot change it: Retryable = true")
 	}
 	odd := ran(OutcomeHung, "")
 	odd.Retryable = true
-	if s := applyAll(Step{}, dispatched, claimed, odd); s.Retryable {
+	if s := applyAll(Step{}, dispatched, claimed, odd); s.Attempts[0].Retryable {
 		t.Errorf("a hang marked retryable: Retryable = true, want false")
+	}
+}
+
+// Facts about attempt n of the read in `job` (which is attempt 1).
+func jobN(n int) string          { return fmt.Sprintf("run-1/read_plate/%d", n) }
+func dispatchN(n int) Dispatched { return Dispatched{JobID: jobN(n), Attempt: n} }
+func claimN(n int) Claimed       { return Claimed{JobID: jobN(n)} }
+func ranN(n int, outcome Outcome, sha string) Finished {
+	return Finished{JobID: jobN(n), Outcome: outcome, StartedAt: t0.Add(time.Duration(n) * time.Minute),
+		FinishedAt: t1.Add(time.Duration(n) * time.Minute), SHA: sha, Error: errorFor(outcome)}
+}
+func storedN(n int, sha string, at time.Time) DataStored {
+	return DataStored{JobID: jobN(n), StorageCheck: StorageCheck{Ref: "s3://lab-data/runs/" + jobN(n) + ".csv", SHA: sha, At: at}}
+}
+func lostN(n int) DataLost { return DataLost{JobID: jobN(n)} }
+func errorFor(o Outcome) string {
+	if o == OutcomeFailed {
+		return "instrument error"
+	}
+	return ""
+}
+
+var gaveUp = GaveUp{Reason: "not repeated"}
+
+// D4: a step is decided by all its attempts. Completed once any attempt is
+// verified (the first to verify supplies data_ref, D2); failed only when every
+// attempt has ended and no further one will be made; otherwise running.
+func TestAStepIsDecidedByAllItsAttempts(t *testing.T) {
+	attempt1Failed := []Fact{dispatchN(1), claimN(1), ranN(1, OutcomeFailed, "")}
+	attempt1Lost := []Fact{dispatchN(1), claimN(1), ranN(1, OutcomeCompleted, "X"), lostN(1)}
+	then := func(a []Fact, more ...Fact) []Fact { return append(slices.Clone(a), more...) }
+	cases := []struct {
+		name     string
+		start    Step
+		facts    []Fact
+		phase    Phase
+		errorHas string // "" means no error
+		dataRef  string // "" means none
+		attempts int
+	}{
+		{"an ended attempt waits for the retry decision", Step{}, attempt1Failed,
+			PhaseEnded, "instrument error", "", 1},
+		{"given up after a failure: failed, and says why", Step{}, then(attempt1Failed, gaveUp),
+			PhaseFailed, "instrument error; not repeated", "", 1},
+		{"a hang waits for the retry decision", Step{}, []Fact{dispatchN(1), claimN(1), ranN(1, OutcomeHung, "")},
+			PhaseEnded, "instrument hung; outcome unknown", "", 1},
+		{"given up after a hang: failed, outcome unknown", Step{}, []Fact{dispatchN(1), claimN(1), ranN(1, OutcomeHung, ""), gaveUp},
+			PhaseFailed, "instrument hung; outcome unknown; not repeated", "", 1},
+		{"a new attempt is retrying until claimed, never back to pending", Step{}, then(attempt1Failed, dispatchN(2)),
+			PhaseRetrying, "", "", 2},
+		{"a second attempt that completes completes the step", Step{}, then(attempt1Failed, dispatchN(2), claimN(2), ranN(2, OutcomeCompleted, "")),
+			PhaseCompleted, "", "", 2},
+		{"a second attempt that fails waits for the decision again", Step{}, then(attempt1Failed, dispatchN(2), claimN(2), ranN(2, OutcomeFailed, "")),
+			PhaseEnded, "instrument error", "", 2},
+		{"no second attempt while the first is in flight", Step{}, []Fact{dispatchN(1), claimN(1), dispatchN(2)},
+			PhaseClaimed, "", "", 1},
+		{"attempts are numbered in order", Step{}, then(attempt1Failed, dispatchN(3)),
+			PhaseEnded, "instrument error", "", 1},
+		{"no attempt after giving up", Step{}, then(attempt1Failed, gaveUp, dispatchN(2)),
+			PhaseFailed, "not repeated", "", 1},
+		{"giving up while an attempt is in flight is ignored", Step{}, []Fact{dispatchN(1), claimN(1), gaveUp},
+			PhaseClaimed, "", "", 1},
+		{"a give-up ignored in flight stays ignored once the attempt ends", Step{}, []Fact{dispatchN(1), claimN(1), gaveUp, ranN(1, OutcomeFailed, "")},
+			PhaseEnded, "instrument error", "", 1},
+		{"a conflicting report after giving up reopens the step: unresolved, not failed", Step{},
+			then(attempt1Failed, gaveUp, ranN(1, OutcomeCompleted, "")),
+			PhaseUnresolved, "conflicting", "", 1},
+
+		// Lost data: attempt 1 stays open alongside its re-read (D3, D4).
+		{"a lost read may be re-read alongside it", reader, then(attempt1Lost, dispatchN(2)),
+			PhaseRetrying, "", "", 2},
+		{"a re-read that fails leaves the lost read open: not failed", reader,
+			then(attempt1Lost, dispatchN(2), claimN(2), ranN(2, OutcomeFailed, "")),
+			PhaseUnresolved, "may still appear", "", 2},
+		{"giving up cannot fail a step whose lost read is still open", reader,
+			then(attempt1Lost, dispatchN(2), claimN(2), ranN(2, OutcomeFailed, ""), gaveUp),
+			PhaseUnresolved, "may still appear", "", 2},
+		{"a verified re-read completes the step", reader,
+			then(attempt1Lost, dispatchN(2), claimN(2), ranN(2, OutcomeCompleted, "Y"), storedN(2, "Y", t2)),
+			PhaseCompleted, "", jobN(2), 2},
+		{"a late upload after the re-read decided does not replace it", reader,
+			then(attempt1Lost, dispatchN(2), claimN(2), ranN(2, OutcomeCompleted, "Y"), storedN(2, "Y", t2), storedN(1, "X", t3)),
+			PhaseCompleted, "", jobN(2), 2},
+		{"a late upload before the re-read finishes decides, and stays", reader,
+			then(attempt1Lost, dispatchN(2), claimN(2), storedN(1, "X", t2), ranN(2, OutcomeCompleted, "Y"), storedN(2, "Y", t3)),
+			PhaseCompleted, "", jobN(1), 2},
+		{"a re-read that fails after the late upload decided changes nothing", reader,
+			then(attempt1Lost, dispatchN(2), claimN(2), storedN(1, "X", t2), ranN(2, OutcomeFailed, "")),
+			PhaseCompleted, "", jobN(1), 2},
+		{"a conflict on the deciding read is unresolved and claims no data_ref", reader,
+			[]Fact{dispatchN(1), claimN(1), ranN(1, OutcomeCompleted, "X"), storedN(1, "X", t2), ranN(1, OutcomeFailed, "")},
+			PhaseUnresolved, "conflicting", "", 1},
+		{"no attempt after the step completed", Step{}, []Fact{dispatchN(1), claimN(1), ranN(1, OutcomeCompleted, ""), dispatchN(2)},
+			PhaseCompleted, "", "", 1},
+
+		// Cancel, as D1 has it, across attempts.
+		{"cancel after a failed attempt: failed, not retried", Step{}, then(attempt1Failed, Cancel{}),
+			PhaseFailed, "instrument error; not retried: cancelled", "", 1},
+		{"cancel wins over the retry's claim; the attempt that ran still shows", Step{}, then(attempt1Failed, dispatchN(2), Cancel{}, claimN(2)),
+			PhaseFailed, "instrument error; not retried: cancelled", "", 2},
+		{"no new attempt after a cancel", Step{}, []Fact{dispatchN(1), claimN(1), Cancel{}, ranN(1, OutcomeFailed, ""), dispatchN(2)},
+			PhaseFailed, "not retried: cancelled", "", 1},
+		{"a cancel never undoes a completion", Step{}, []Fact{dispatchN(1), claimN(1), ranN(1, OutcomeCompleted, ""), Cancel{}},
+			PhaseCompleted, "", "", 1},
+		{"a lost read is not re-read after a cancel, and stays open", reader, then(attempt1Lost, Cancel{}, dispatchN(2)),
+			PhaseUnresolved, "may still appear", "", 1},
+		{"cancelled only if no attempt ever ran", Step{}, []Fact{dispatchN(1), Cancel{}},
+			PhaseCancelled, "", "", 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := applyAll(c.start, c.facts...)
+			if got := s.Phase(); got != c.phase {
+				t.Fatalf("phase = %s, want %s (step %+v)", got, c.phase, s)
+			}
+			e := s.APIError()
+			switch {
+			case c.errorHas == "" && e != nil:
+				t.Errorf("error = %q, want none", *e)
+			case c.errorHas != "" && (e == nil || !strings.Contains(*e, c.errorHas)):
+				t.Errorf("error = %v, want it to contain %q", e, c.errorHas)
+			}
+			ref := s.APIDataRef()
+			switch {
+			case c.dataRef == "" && ref != nil:
+				t.Errorf("data_ref = %s, want none", *ref)
+			case c.dataRef != "" && (ref == nil || !strings.Contains(*ref, c.dataRef)):
+				t.Errorf("data_ref = %v, want the object of %s", ref, c.dataRef)
+			}
+			if len(s.Attempts) != c.attempts {
+				t.Errorf("%d attempts kept, want %d", len(s.Attempts), c.attempts)
+			}
+		})
+	}
+}
+
+// The step's times are those of the attempt that decided it, or of the latest
+// attempt that ran.
+func TestStepTimesComeFromTheDecidingAttempt(t *testing.T) {
+	s := applyAll(Step{}, dispatchN(1), claimN(1), ranN(1, OutcomeFailed, ""), dispatchN(2), claimN(2), ranN(2, OutcomeCompleted, ""))
+	if start, end := s.Times(); !start.Equal(t0.Add(2*time.Minute)) || !end.Equal(t1.Add(2*time.Minute)) {
+		t.Errorf("times %v..%v, want attempt 2's", start, end)
+	}
+	s = applyAll(Step{}, dispatchN(1), claimN(1), ranN(1, OutcomeFailed, ""), dispatchN(2), Cancel{})
+	if start, _ := s.Times(); start == nil || !start.Equal(t0.Add(time.Minute)) {
+		t.Errorf("start %v, want attempt 1's: attempt 2 never ran", start)
 	}
 }

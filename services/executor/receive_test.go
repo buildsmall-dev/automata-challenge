@@ -300,7 +300,12 @@ func TestFinishedKeepsRetryable(t *testing.T) {
 	ev := finished(job, at)
 	ev.Outcome, ev.Error, ev.Retryable = "failed", "instrument error during fill", true
 	h.event("liquid-handler-1", ev)
-	h.waitStep(rv.ID, "fill", StepFailed)
+	// The run was never started, so no decision follows: the step stays ended.
+	for deadline := time.Now().Add(5 * time.Second); phaseOf(t, h.e, rv.ID, "fill") != PhaseEnded; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("fill is %s, want ended", phaseOf(t, h.e, rv.ID, "fill"))
+		}
+	}
 
 	var s Step
 	var raw []byte
@@ -310,7 +315,7 @@ func TestFinishedKeepsRetryable(t *testing.T) {
 	if err := json.Unmarshal(raw, &s); err != nil {
 		t.Fatal(err)
 	}
-	if !s.Retryable {
+	if len(s.Attempts) != 1 || !s.Attempts[0].Retryable {
 		t.Errorf("step after a retryable failure = %+v, want Retryable", s)
 	}
 }
