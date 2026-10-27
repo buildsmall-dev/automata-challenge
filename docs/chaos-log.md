@@ -20,7 +20,9 @@ One entry per experiment, newest last. Feeds NOTES.md §4–5.
 
 ## C1. Network partition of a NATS client (before any application code)
 
-- **Setup:** throwaway probe `tmp/_natsprobe` (local, not committed). Probe container on
+- **Setup:** throwaway probe `tmp/_natsprobe`. **This script is local only and not in the repo, so C1
+  can't be fully reproduced from the repository** (K8); the setup and command below describe
+  what it did. Probe container on
   `lab-network`, peer on the host never partitioned. Every 200ms a core publish, every 1s a
   request (2s timeout), every 1s a JetStream publish (5s timeout, Msg-Id). nats.go v1.53.1,
   nats-server 2.10.29, Docker Desktop for Mac.

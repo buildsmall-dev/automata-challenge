@@ -7,14 +7,9 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
 | Session | Start | End | Notes |
 | --- | --- | --- | --- |
 | 1 | 2026-10-25 | 2026-10-26 | exploration, repo setup, working process, D1 + disconnect experiment |
-| 2 | 2026-10-26 09:xx | 2026-10-26 14:10 | S1–S6, R1 (PRs #4–#11) |
-| 3 | 2026-10-27 00:13 | 2026-10-27 02:xx | D4 and its slices, C3, S7 (PRs #12–#18) |
-| 4 | 2026-10-27 08:xx | 2026-10-27 10:xx | cancel, GraphQL, C4, docs review (PRs #19–#22) |
 
-Sessions 2–4 were added in the review, from commit times (local clock): first and last commit
-of each burst. A session starts before its first commit, so the real start is earlier and
-marked `xx`. The commit span is about 10.5h in total. **The user confirms the actual time
-spent for NOTES.md §6**; this table is a lower bound, not a measurement.
+Later sessions, and the total time spent (NOTES.md §6), are for the user to fill in. Commit
+times are not used for this: they are far from the actual active time.
 
 ## Template
 
@@ -114,7 +109,7 @@ spent for NOTES.md §6**; this table is a lower bound, not a measurement.
   that never returns leaves a step unknown (operator "declare lost" deferred, K6); dedupe
   window 2 min, after which repeats rely on idempotent apply; replay covers the whole
   ledger on every start (K35); single NATS server and single executor.
-  Explainer: `tmp/d1-messaging-v2.html` (as recorded; not updated for the changes below).
+  Explainer: `docs/html/d1-messaging-v2.html` (as recorded; not updated for the changes below).
 - **Slice / PR:** recorded in #3. Built in S1 #4 (lifecycle), S2 #5 (store), S3 #6
   (contract), S4 #7 (driver), S5a #8 (executor receives), S5b #9 (executor sends),
   S6 #10 (plate data), R1 #11 (replay).
@@ -292,7 +287,7 @@ spent for NOTES.md §6**; this table is a lower bound, not a measurement.
   narrower; operator abandon deferred, above); a retry fails acceptance check 5 under faults
   (K5); a re-read is a different measurement, taken later; what a run's own status is after a
   cancel is left to the cancel slice (K42; review 2026-10-27: settled by D5).
-  Explainers: `tmp/d4-hang-retry.html` (v1), `tmp/d4-hang-retry-v2.html`.
+  Explainers: `docs/html/d4-hang-retry.html` (v1), `docs/html/d4-hang-retry-v2.html`.
 - **Slice / PR:** recorded in #12. Built in #13 (protocol `retryable`), #14 (lifecycle:
   attempts, the all-attempts rule), #15 (store lookup by job id) and #16 (policy). Tested by
   C3 (#17).
