@@ -43,6 +43,9 @@ type fakeDriver struct {
 	retryable map[string]bool      // job or step -> a failure the instrument says may be repeated
 	stall     map[string]bool      // job or step -> claim it, then never start it (a driver that died)
 	slow      time.Duration        // between a granted claim and the instrument starting
+	takes     time.Duration        // between started and finished
+	busyFor   map[string]bool      // job -> always answer busy
+	physical  map[string]int       // job -> times it really started (after go); ledger also counts reservations
 	sub       *nats.Subscription
 }
 
@@ -50,7 +53,8 @@ func newFakeDriver(t *testing.T, nc *nats.Conn, device string) *fakeDriver {
 	js, _ := jetstream.New(nc)
 	d := &fakeDriver{t: t, nc: nc, js: js, device: device,
 		outcome: map[string]string{}, ledger: map[string]int{}, cmds: map[string]int{}, attempt: map[string]int{},
-		at: map[string]time.Time{}, sha: map[string]string{}, lose: map[string]bool{}, retryable: map[string]bool{}, stall: map[string]bool{}}
+		at: map[string]time.Time{}, sha: map[string]string{}, lose: map[string]bool{}, retryable: map[string]bool{}, stall: map[string]bool{},
+		busyFor: map[string]bool{}, physical: map[string]int{}}
 	return d
 }
 
@@ -79,6 +83,8 @@ func (d *fakeDriver) onRun(m *nats.Msg) {
 		result = protocol.RunKnown
 	case d.busy > 0:
 		d.busy--
+		result = protocol.RunBusy
+	case d.busyFor[cmd.JobID]:
 		result = protocol.RunBusy
 	case d.running:
 		result = protocol.RunBusy
@@ -113,15 +119,16 @@ func (d *fakeDriver) execute(cmd protocol.RunCommand) {
 		return
 	}
 	d.mu.Lock()
-	stall := forJob(d.stall, cmd)
+	stall, slow, takes := forJob(d.stall, cmd), d.slow, d.takes
 	d.mu.Unlock()
 	if stall {
 		return
 	}
-	time.Sleep(d.slow)
+	time.Sleep(slow)
 	start := time.Now().UTC()
-	end := start.Add(10 * time.Millisecond)
+	end := start.Add(10*time.Millisecond + takes)
 	d.mu.Lock()
+	d.physical[cmd.JobID]++
 	outcome, sha, lose, retryable := forJob(d.outcome, cmd), forJob(d.sha, cmd), forJob(d.lose, cmd), forJob(d.retryable, cmd)
 	d.at[cmd.JobID] = end
 	d.mu.Unlock()
@@ -129,7 +136,13 @@ func (d *fakeDriver) execute(cmd protocol.RunCommand) {
 		outcome = "completed"
 	}
 	d.publish(protocol.Event{Kind: protocol.KindStarted, JobID: cmd.JobID, StartedAt: &start})
-	d.publish(protocol.Event{Kind: protocol.KindFinished, JobID: cmd.JobID, Outcome: outcome, StartedAt: &start, FinishedAt: &end, SHA: sha, Retryable: retryable && outcome == "failed"})
+	time.Sleep(takes)
+	var why string
+	if outcome == "failed" {
+		why = "instrument error" // the ledger always says why a job failed
+	}
+	d.publish(protocol.Event{Kind: protocol.KindFinished, JobID: cmd.JobID, Outcome: outcome, StartedAt: &start, FinishedAt: &end,
+		Error: why, SHA: sha, Retryable: retryable && outcome == "failed"})
 	if lose {
 		d.publish(protocol.Event{Kind: protocol.KindDataLost, JobID: cmd.JobID})
 	}
@@ -150,6 +163,12 @@ func forJob[V any](m map[string]V, cmd protocol.RunCommand) V {
 		return v
 	}
 	return m[cmd.Step]
+}
+
+func (d *fakeDriver) started(jobID string) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.physical[jobID]
 }
 
 func (d *fakeDriver) ran(jobID string) int { d.mu.Lock(); defer d.mu.Unlock(); return d.ledger[jobID] }

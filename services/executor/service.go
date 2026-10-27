@@ -123,9 +123,72 @@ func (e *Executor) StartRun(ctx context.Context, runID string) (RunView, error) 
 	return e.GetRun(ctx, runID)
 }
 
+// CancelRun records the cancel on every step of the run in one transaction, so
+// it is never half applied: what was not sent never will be, an attempt sent and
+// not claimed is cancelled, and no new attempt is made. What is claimed or
+// running is not stopped (D1); its evidence is still recorded, and the run ends
+// once nothing is in flight (finish). A run not started is cancelled at once; a
+// finished one is left as it is.
 func (e *Executor) CancelRun(ctx context.Context, runID string) (RunView, error) {
-	// TODO
-	return RunView{}, fmt.Errorf("cancel: %w", ErrNotImplemented)
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RunView{}, fmt.Errorf("cancel %s: %w", runID, err)
+	}
+	defer tx.Rollback()
+	var status string
+	err = tx.QueryRowContext(ctx, `SELECT status FROM runs WHERE id = $1 FOR UPDATE`, runID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RunView{}, ErrRunNotFound
+	}
+	if err != nil {
+		return RunView{}, fmt.Errorf("cancel %s: %w", runID, err)
+	}
+	if status != RunPending && status != RunRunning {
+		return e.GetRun(ctx, runID)
+	}
+
+	// Every step is locked, in position order (K12), before any is changed.
+	rows, err := tx.QueryContext(ctx, `SELECT name, lifecycle FROM steps WHERE run_id = $1 ORDER BY position FOR UPDATE`, runID)
+	if err != nil {
+		return RunView{}, fmt.Errorf("cancel %s: %w", runID, err)
+	}
+	var names []string
+	var steps []Step
+	for rows.Next() {
+		var name string
+		var raw []byte
+		if err := rows.Scan(&name, &raw); err != nil {
+			rows.Close()
+			return RunView{}, fmt.Errorf("cancel %s: %w", runID, err)
+		}
+		s, err := decodeStep(raw)
+		if err != nil {
+			rows.Close()
+			return RunView{}, fmt.Errorf("cancel %s/%s: %w", runID, name, err)
+		}
+		names, steps = append(names, name), append(steps, s)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return RunView{}, fmt.Errorf("cancel %s: %w", runID, err)
+	}
+	for i, s := range steps {
+		if s, changed := Apply(s, Cancel{}); changed {
+			if err := saveStep(ctx, tx, runID, names[i], s); err != nil {
+				return RunView{}, err
+			}
+		}
+	}
+	if status == RunPending {
+		if _, err := tx.ExecContext(ctx, `UPDATE runs SET status = $1, finished_at = now() WHERE id = $2`, RunCancelled, runID); err != nil {
+			return RunView{}, fmt.Errorf("cancel %s: %w", runID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return RunView{}, fmt.Errorf("cancel %s: %w", runID, err)
+	}
+	e.poke()
+	return e.GetRun(ctx, runID)
 }
 
 func (e *Executor) GetRun(ctx context.Context, runID string) (RunView, error) {
