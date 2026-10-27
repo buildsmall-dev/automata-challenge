@@ -300,3 +300,46 @@ func TestStoreRefusesAnOlderLifecycle(t *testing.T) {
 		t.Fatalf("applying to a v1 step: err = %v, want a refusal naming its version", err)
 	}
 }
+
+// A fact for an earlier attempt reaches it, though the step has moved on to a
+// later one (K45): here the late upload of a read whose data was lost, after
+// its re-read was sent. It decides the step (D4).
+func TestStoreFindsEarlierAttempts(t *testing.T) {
+	e := NewExecutor(testDB(t), nil, nil)
+	rv := newRun(t, e)
+	ctx := context.Background()
+	first, second := rv.ID+"/read_plate/1", rv.ID+"/read_plate/2"
+	e.applyToStep(ctx, rv.ID, "read_plate", Dispatched{JobID: first, Attempt: 1})
+	mustApply(t, e, first, Claimed{JobID: first})
+	mustApply(t, e, first, Finished{JobID: first, Outcome: OutcomeCompleted, StartedAt: time.Now(), FinishedAt: time.Now(), SHA: "abc"})
+	mustApply(t, e, first, DataLost{JobID: first})
+	if s, _, err := e.applyToStep(ctx, rv.ID, "read_plate", Dispatched{JobID: second, Attempt: 2}); err != nil || s.JobID() != second {
+		t.Fatalf("re-read not dispatched: %v, %+v", err, s)
+	}
+
+	ref := "s3://lab-data/runs/" + first + ".csv"
+	s := mustApply(t, e, first, DataStored{JobID: first, StorageCheck: StorageCheck{Ref: ref, SHA: "abc", At: time.Now()}})
+	if s.Decided != 1 {
+		t.Errorf("late upload of attempt 1: decided by %d, want 1", s.Decided)
+	}
+	if sv := stepView(t, e, rv.ID, "read_plate"); sv.Status != StepCompleted || sv.DataRef == nil || *sv.DataRef != ref {
+		t.Errorf("read_plate: %s, data_ref %v; want completed with attempt 1's object", sv.Status, sv.DataRef)
+	}
+}
+
+// Only a job the step has an attempt for is known, and only from its device.
+func TestStoreUnknownAttempts(t *testing.T) {
+	e := NewExecutor(testDB(t), nil, nil)
+	rv := newRun(t, e)
+	e.applyToStep(context.Background(), rv.ID, "fill", Dispatched{JobID: rv.ID + "/fill/1", Attempt: 1})
+	for _, c := range []struct{ device, job string }{
+		{"liquid-handler-1", rv.ID + "/fill/2"}, // no such attempt
+		{"liquid-handler-1", rv.ID + "/fill"},   // not a job id
+		{"liquid-handler-1", rv.ID + "/nope/1"}, // no such step
+		{"incubator-1", rv.ID + "/fill/1"},      // not the step's device
+	} {
+		if _, _, err := e.applyToJob(context.Background(), c.device, c.job, Claimed{JobID: c.job}); !errors.Is(err, ErrUnknownJob) {
+			t.Errorf("%s from %s: err = %v, want ErrUnknownJob", c.job, c.device, err)
+		}
+	}
+}

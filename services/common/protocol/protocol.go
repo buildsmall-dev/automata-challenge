@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -46,6 +47,21 @@ func EventSubject(device string, kind Kind) string { return "lab." + device + ".
 // recognised there instead of being run twice.
 func JobID(runID, step string, attempt int) string {
 	return fmt.Sprintf("%s/%s/%d", runID, step, attempt)
+}
+
+// ParseJobID splits a job id into what JobID made it from. A run id has no
+// slash and the attempt is a number, so a step name may contain one.
+func ParseJobID(jobID string) (runID, step string, attempt int, ok bool) {
+	runID, rest, ok1 := strings.Cut(jobID, "/")
+	i := strings.LastIndex(rest, "/")
+	if !ok1 || i < 0 {
+		return "", "", 0, false
+	}
+	n, err := strconv.Atoi(rest[i+1:])
+	if runID == "" || i == 0 || err != nil || n < 1 {
+		return "", "", 0, false
+	}
+	return runID, rest[:i], n, true
 }
 
 // MsgID is the Nats-Msg-Id of an event. JetStream drops a repeat of the same
