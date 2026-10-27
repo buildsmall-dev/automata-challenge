@@ -1,477 +1,506 @@
 # NOTES
 
-The rule I worked to is the one in the README: **the run record must be true.** Every claim
-the record makes needs its own evidence:
+The executor runs lab workflows (small graphs of steps) on three simulated instruments: a
+liquid handler, an incubator and a plate reader. Each instrument has a driver in front of it.
+Messages between the executor and the drivers can be lost, delayed or repeated, and any
+process can crash. The goal is that **the run record stays true** through all of that:
 
-- **How a step ran and when:** the instrument's ledger.
-- **A read's data:** an object in storage whose sha256 matches the ledger.
-- **Without evidence:** the record says `running` while the outcome can still be learned, and
-  `failed` with the reason once it can't. It never says `completed` without evidence.
+- **How a step ran, and when,** comes from the instrument's ledger, its own on-disk record of
+  every job.
+- **A plate read is complete** only when its data is in storage with the sha256 the ledger
+  measured.
+- **Without evidence, no claim.** The record says `running` while the outcome can still be
+  learned, and `failed` with the reason once it can't. It never says `completed` without
+  evidence.
 
-Where to find the detail behind this note:
+## In two minutes
 
-| | |
-| --- | --- |
-| `docs/forengineer/decisions.md` | D1–D6: each design decision, its alternatives, and what it rests on |
-| `docs/forengineer/chaos-log.md` | C1–C4: each experiment, predicted before it ran, then observed |
-| `docs/forengineer/concerns.md` | K1–K62: everything noticed along the way, with a status (resolved, accepted, open) |
-| `docs/html/` | Explainers written for the two biggest decisions, D1 and D4 |
-| `docs/forai/` | The same three records as written during the work, with their history and review notes |
-| `scripts/check-run.py` | Compares a run's record with all three ledgers and with storage |
+- **One rule:** durable facts, short-lived intentions, Postgres decides. Commands are plain
+  NATS requests that are simply sent again if lost. Facts about what happened go through a
+  JetStream stream and wait there until the executor has saved them. Every decision is one
+  Postgres transaction.
+- **Claim before run.** A driver asks permission just before starting a job, under the same
+  database lock a cancel takes, so a job never starts after its cancel.
+- **One job id per attempt,** `<run>/<step>/<attempt>`, reused on every resend. A lost reply
+  or a crash leads to the *same* job being asked about again, never to a second attempt.
+- **Retries need a positive reason** to think repeating is safe: the instrument says the
+  failure is retryable, or the device is configured as safe to repeat (only the plate reader,
+  by default).
+- **Tested by breaking it:** four experiments (crashes, partitions, storage outages, random
+  faults), predicted first, then checked against every ledger and storage. In the final pass
+  all 26 records were true.
+- **Not guaranteed:** a run can stay `running` for ever when the outcome is truly unknown,
+  because no operator action to end it was built. The design also assumes one executor and
+  one driver per instrument.
 
-The work went in through 22 PRs into `dev`. Each one carries a check that failed first, its
-evidence, and a read-only Codex review.
-
-Claims below are labelled **measured** (ran it), **inferred** (read the code) or **guess** where
-it matters.
+Labels used below: **measured** (I ran it), **inferred** (from reading the code),
+**assumed** (the design depends on it; nothing here checks it). The full records are in
+[`docs/forengineer/`](docs/forengineer/) (decisions, experiments, concerns), and an
+interactive walkthrough is in [`docs/html/system-overview.html`](docs/html/system-overview.html).
 
 ---
 
 ## 1. Topology
 
 ```
-             Postgres (runs, steps.lifecycle)  ◄── the only decider
-                          ▲
-                          │ one transaction per fact, under the step's row lock
- ┌────────────────────────┴───────────────┐
- │ executor                                │
- │  dispatch loop (500ms + poke)           │                     ┌──────────────┐
- │  claim handler   event consumer         │ ◄── reads back ──── │ S3 storage   │
- └──┬──────────────────▲──────────▲────────┘                     └──────▲───────┘
-    │ (1) core req     │ (2) core │ (3) JetStream                       │ (4) PUT
-    │ lab.<dev>.cmd.run│ req      │ stream LAB_EVENTS                   │ runs/<run>/<step>/<n>.csv
-    │ accepted|busy|   │ lab.     │ lab.<dev>.evt.{started,finished,    │
-    │ known            │ executor │                stored,data_lost}    │
-    ▼                  │ .claim   │ durable pull consumer "executor"    │
- ┌─────────────────────┴──────────┴─────────────────────────────────────┴──┐
- │ driver (one per instrument)                                              │
- │  accept → claim → inst.Run → read the ledger → publish → upload          │
- └──────────────────────────────┬───────────────────────────────────────────┘
-                                │ in process
-                       instrument + its ledger (on disk, survives restarts)
+ Postgres ◄── one transaction per fact ── Executor ── reads data back, hashes it ──► S3 storage
+ (runs, steps,                           (API, dispatch loop,                         ▲
+  every attempt)                          claims, events)                             │
+                                           │  ▲        ▲                              │
+                              (1) command  │  │ (2)    │ (3) events                   │ (4) upload
+                                           ▼  │ claim  │                              │
+                                     Core NATS        JetStream LAB_EVENTS            │
+                                           │  ▲        ▲                              │
+                                           ▼  │        │                              │
+                                      Driver, one per instrument ─────────────────────┘
+                                           │ same process
+                                      Instrument ──► ledger (file on disk)
 ```
 
 ### What goes over the wire
 
-| # | Subject | Kind | From → to | Reply / ack |
+| | Subject or key | Transport | From → to | Reply or ack |
 | --- | --- | --- | --- | --- |
-| 1 | `lab.<device>.cmd.run` `{v, job_id, run_id, step, attempt}` | core request/reply | executor → driver | `accepted`, `busy` or `known`. No reply means unknown |
-| 2 | `lab.executor.claim` `{v, job_id, device}` | core request/reply, queue group `executor` | driver → executor | `go` or `abort`. No reply if the database fails |
-| 3 | `lab.<device>.evt.<kind>`, kind = `started`, `finished`, `stored` or `data_lost` | JetStream stream `LAB_EVENTS` (file storage), `Nats-Msg-Id` = `<job_id>:<kind>` | driver → executor | The driver retries until it gets a PubAck. The executor acks only after its database commit |
-| 4 | `runs/<run>/<step>/<attempt>.csv` | S3 PUT, then a `stored` event | driver → storage | The executor reads the object back and hashes it |
+| 1 | `lab.<device>.cmd.run` `{job_id, run_id, step, attempt}` | core NATS request | executor → driver | `accepted`, `busy`, or `known` (already has the job). No reply = unknown |
+| 2 | `lab.executor.claim` `{job_id, device}` | core NATS request, queue group `executor` | driver → executor | `go` or `abort`. No reply if the database fails; the driver asks again |
+| 3 | `lab.<device>.evt.{started,finished,stored,data_lost}` | JetStream stream `LAB_EVENTS` (file storage), durable pull consumer `executor`, ack wait 30s | driver → executor | The driver retries until JetStream confirms. The executor acks only after its database commit |
+| 4 | `runs/<run>/<step>/<attempt>.csv` | S3 PUT, then `stored` | driver → storage | The executor reads it back from the key it computes itself |
 
-`job_id` is `<run>/<step>/<attempt>`. A job is one attempt at one step, and it is the unit of
-idempotency everywhere.
+- **Duplicates.** Each event's message id is `<job id>:<kind>`, so JetStream drops a repeat
+  within its 2-minute window. After that, applying a fact twice changes nothing.
+- **Events that can't be applied.** A malformed event, or one from a device that doesn't
+  match its subject, is rejected for good. One for a job no step has is acked and logged. A
+  database error means redelivery after 1s, and an unreadable `stored` object after 2s.
+- **Connection health.** Both sides set NATS pings to 5s, with 2 outstanding.
 
-### One step, in order
+### Where state lives
 
-1. **Dispatch.** The dispatch loop picks the steps `NextSteps` says are ready. It records a
-   `Dispatched` fact, then sends the command.
-   - **`busy` or no answer:** asks again after 500ms.
-   - **`accepted` or `known`:** asks again after 3s, until there is evidence the job started.
-   - **A timeout:** means *unknown*. The command is resent with the same `job_id`, never
-     as a new attempt.
-2. **Claim.** Before `inst.Run`, the driver asks `lab.executor.claim`.
-   - **The executor's side:** it applies `Claimed` under the step's row lock, the same lock a
-     cancel takes, so exactly one of claim and cancel wins.
-   - **`go`:** the driver runs the job.
-   - **`abort` or no answer:** the job doesn't run. On no answer the driver asks again.
-3. **Run and report.** The driver reads how the job went from the **ledger**, not from `Run`'s
-   return value. It publishes `started` and `finished` with the ledger's times and outcome,
-   and forwards the instrument's `retryable` flag on a failure.
-4. **Data.** For a read, the driver uploads the bytes, retrying until storage takes them. It
-   keeps the device busy meanwhile, because the bytes exist only in its memory. Then it
-   publishes `stored`.
-5. **Verify.** The executor does not take `stored` on trust. It reads the object at the key it
-   derives itself and hashes it.
-   - **Hash matches the ledger's sha256:** the read is completed, and only then does it get a
-     `data_ref`.
-6. **Apply.** Every event becomes one fact, applied idempotently in one transaction. Then the
-   event is acked. Messages that can't apply are handled like this:
-   - **Malformed, or from a device that doesn't match its subject:** Term'd.
-   - **For a job no step has:** acked and logged.
-   - **Database error:** Nak'd, and retried after 1s.
-   - **An object not readable yet:** Nak'd, and retried after 2s.
-
-### Recovery paths
-
-- **Driver restart (R1):** before taking commands, the driver replays its whole ledger as
-  `started` and `finished` events.
-  - **A job cut off by the restart:** the instrument closes it as `hung` (`instrument.go:341`).
-  - **A completed read:** the driver asks storage. Present means it publishes `stored`.
-    Absent after an upload grace (2 × the storage timeout) means it publishes `data_lost`.
-    No answer means it asks again.
-- **Claimed, but no evidence (S7):** the same command is resent every 3s. The command itself
-  asks the driver what it knows:
-  - **`known`:** the job is in flight or in the ledger, so it ran or is running.
-  - **`accepted`:** the driver has no record of the job, so it never started. It runs once.
-  - **No answer:** the outcome stays unknown, and the command is asked again.
-- **Executor restart:** all intent is in Postgres and every event waits in the stream.
-  Nothing in executor memory needs recovering.
-- **Lost read (D3):** every 10s the executor searches storage for the data of reads
-  reported lost.
-
-### Where each piece of state lives
-
-| State | Where | Notes |
+| State | Where | Survives a restart |
 | --- | --- | --- |
-| Runs, steps, every attempt and every fact about it | Postgres: `runs`, and `steps.lifecycle` (JSONB) | **Source of truth for intent.** `status`, `phase`, the times, `error` and `data_ref` are derived from the lifecycle and written in the same `UPDATE` |
-| What physically happened | Each instrument's ledger, on its disk | **Source of truth for physical facts.** Written before work starts, and survives restarts |
-| Facts in transit | JetStream `LAB_EVENTS` | Durable, so they wait while the executor is down. Duplicates are dropped by Msg-Id within 2 min, and by idempotent apply after that |
-| Plate data | S3, at `runs/<job_id>.csv` | The key is derived from the job, so a retried upload overwrites rather than adds |
-| A read's bytes before they're stored | Driver memory | The one place where data can be lost. Covered by replay and D3 |
-| Queue of what to run next | Postgres (the step phases) + `NextSteps` | There is no queue in NATS |
+| Intent: runs, steps, every attempt and fact. Also the queue (there is none in NATS) | Postgres, `steps.lifecycle` (JSON) | yes |
+| What physically happened | each instrument's ledger, written before work starts | yes |
+| Facts in transit | JetStream `LAB_EVENTS` | yes |
+| Plate data | S3 | yes |
+| A read's bytes before upload | driver memory | **no**: the one place data can be lost |
 
-**Lifecycle phases:**
-- `pending` and `dispatched` show as API `pending`.
-- `retrying`, `claimed`, `running`, `storing`, `unresolved` and `ended` show as API `running`.
-- `completed`, `failed` and `cancelled` are terminal.
+### A normal step
 
-A run finishes only when nothing is in flight. Its `finished_at` is the last ledger time, not
-the time the executor noticed.
+`read_plate` on `plate-reader-1`, with what the REST API says at each point:
+
+1. **Dispatch.** Every 500ms, or at once when a fact arrives, the executor asks Postgres
+   which steps are ready. It records attempt 1 (`run-3c9e/read_plate/1`), then sends the
+   command. *API: `pending`.*
+2. **Resend until started.** The command is sent again after 500ms on `busy` or no reply, and
+   every 3s on `accepted` or `known`. It is always the same job id.
+3. **Claim.** Before touching the instrument, the driver claims the job. The executor
+   records the claim under the step's row lock and answers `go`. *API: `running`, no start
+   time yet: permission is not evidence.*
+4. **Run.** The instrument writes its ledger entry before any physical work. The driver
+   reads the ledger, not `Run`'s return value (a hung job never returns), and publishes
+   `started` and then `finished` with the ledger's times, outcome and data hash. *API:
+   `running`, with the ledger's times.*
+5. **Store and verify.** The driver uploads the bytes, retrying until storage accepts them
+   and keeping the device busy meanwhile, then publishes `stored`. The executor reads the
+   object back and compares its sha256 with the ledger's. *API: `completed`, with
+   `data_ref`.*
+6. **Finish.** When no step is in flight, the run ends. Its `finished_at` is the last ledger
+   time, not the moment the executor noticed.
+
+### Recovery
+
+- **A driver restarts:** it first *replays* its ledger. It reports how every job ended, and a
+  job cut off by the restart is reported `hung` (the instrument marks it so). For each
+  completed read, it asks storage: present → `stored`; still absent after a 10s grace →
+  `data_lost`.
+- **A step is claimed but nothing says it started:** the executor keeps resending the same
+  command every 3s (§2.3).
+- **The executor restarts:** its intent is in Postgres and its facts wait in the stream, so
+  nothing in its memory needs recovering.
+- **A read was reported lost:** every 10s the executor looks in storage for its object (§2.4).
 
 ---
 
 ## 2. Why this topology
 
-**One rule shaped all of it:** durable facts, short-lived intentions, and Postgres decides.
+### 2.1 Measured before designing
 
-### D1. Commands by request/reply, facts by JetStream, claim before run
+Before writing code, I cut a bare NATS client off the network for 6s and 20s, with default
+and with 2s pings (C1). My prediction was wrong twice (measured):
 
-**Chosen:**
-- **Commands** are core request/reply.
-- **Facts** go through JetStream.
-- **The driver claims** a job, under the same row lock as a cancel, before running it.
+- **Requests that timed out were still delivered,** up to 20s late. With default pings the
+  TCP connection survived, so nothing was lost, but everything was late.
+- **7 of 8 JetStream publishes that reported a timeout had been stored.**
 
-**Instead of:**
-- *A, request/reply plus executor polling:* simplest. But while the executor is down, facts
-  live only in driver memory and the ledger. It also assumes the instrument can always be
-  asked, which is true of this simulator and false of most equipment.
-- *B, JetStream both ways:* a durable command queue makes stale physical commands possible,
-  such as a dispense delivered after a cancel. It also forces AckWait tuning across jobs
-  that last from 2s to hours, with 30s hangs.
-- *D, shared state in NATS KV:* a second source of truth beside Postgres, without
-  transactions.
-- *Command expiry or a cancel broadcast, instead of a claim:* both narrow the window for a
-  late command, but they race with the cancel, and expiry depends on clocks.
+So **a timeout means "unknown", never "didn't happen"**. Any design that turns "no reply"
+into "start a new attempt", or "failed", would sooner or later run a job twice or record a
+false outcome. Every decision below follows from that.
 
-**Why, measured first (C1).** I partitioned a bare NATS client before writing any code, and
-my prediction was wrong twice:
-- With default pings, nothing was lost but everything was late. That included requests the
-  sender had already given up on, which arrived about 20s late.
-- 7 of 8 JetStream publishes that reported a timeout had in fact been stored.
+### 2.2 Requests for commands, a stream for facts, Postgres decides
 
-So a timeout means *unknown*, never "it didn't happen". That rules out "no reply, so send a
-new attempt" and anything that treats a timeout as "not delivered". It's why the design
-has:
-- the claim;
-- resending the same `job_id`;
-- Msg-Id plus idempotent apply;
-- an explicit `PingInterval` (5s, 2 outstanding).
+A lost command is harmless: it is sent again. A *stored* command is dangerous: it can run
+late, after a cancel or after someone has moved the plate. Facts are the opposite: losing one
+leaves the record wrong, so they must survive an executor that is down.
 
-### Reconcile by resending, not by a query (S7)
+| Alternative | Why not |
+| --- | --- |
+| Requests only; the executor polls drivers for outcomes | While the executor is down, facts exist only in driver memory and the ledger. It also assumes an instrument can always be asked, which is true of this simulator, not of most equipment |
+| JetStream for commands too | A durable command can run late. One ack timeout would also have to fit jobs of 2 seconds and of hours |
+| Shared state in NATS KV | A second source of truth beside Postgres, without transactions |
 
-- **The case:** a step that is claimed with no evidence. The driver died after its claim, or
-  the instrument refused the job.
-- **Chosen:** resend the same command.
-- **Instead of:** a separate `job` query subject.
-- **Why:** the command already asks the driver what it knows of the job. Its idempotence
-  (`known` if the job is current, on the instrument, or in the ledger) is what makes the
-  resend safe. A query would add a subject and driver code to learn nothing more.
-- **Measured live:** a driver killed after its claim was granted but before it started. The
-  job ran exactly once after the restart.
+**Trade-offs.** Delivery is at least once, not exactly once, so every fact must apply
+idempotently, and it does. When the executor is cut off, events already handed to it are
+redelivered only after the 30s ack wait. That delays the record, but doesn't falsify it
+(§4).
 
-### D2. A verified completion is never undone
+### 2.3 Claim before run, and resend the same job
 
-- **Chosen:** if a later read-back no longer matches the ledger, the step stays `completed`
-  and the mismatch is reported.
-- **Why:** "completed, data verified at T" stays true for ever. Moving the status back would
-  regress it after dependent steps had already run.
+**Claim.** A late command, or a cancel arriving at any moment, must never lead to a job
+starting after its cancel. The driver's claim and the cancel take the same row lock, so
+exactly one of them is first:
 
-### D3. A read reported lost stays open
+- if the cancel is first, the claim gets `abort`;
+- if the claim is first, the job may run, and its outcome is recorded when it arrives.
 
-- **Chosen:** `data_lost` makes the read *unresolved* (API `running`), not failed. The
-  executor keeps looking in storage, and a matching object completes the read.
-- **Why:** a dead driver's upload can still land later, and nothing bounds when.
-- **Found in C2:** the first version failed the read after a grace period, and a late upload
-  then contradicted the record.
-- **Rejected alternative, making loss final with a create-only write (`If-None-Match: *`):**
-  SeaweedFS 3.62 ignores the header. A second conditional PUT returned 200 and overwrote
-  the object (measured).
+The rejected alternatives, commands that expire or a broadcast cancel, only narrow the
+window. They still race with the cancel, and expiry depends on synchronised clocks.
 
-### D4. Retry per cause and per device, bounded
+**Resend.** My first version stopped sending once a step was claimed. That left a gap: a
+driver that dies after its claim, before starting, leaves nothing in its ledger, so no event
+ever comes. I reproduced it (PR #18, measured). I held the step's row lock in `psql`, so
+`liquid-handler-1`'s claim for `fill_sample_plate` waited in the executor. Then I killed the
+driver and released the lock, so the `go` went to a dead inbox. The run was still `running`
+20s after the driver restarted.
 
-**Chosen:** a new attempt needs a positive claim that repeating is safe, from the source
-for its cause:
+The fix is to keep resending the same command while a step is claimed with no evidence, and
+to treat the driver's answer as evidence:
 
-| Cause | Who says it is safe | Default |
+- **`known`:** the driver has the job, in flight or in its ledger.
+- **`accepted`:** the driver has no record of it, so it never started (the ledger is written
+  before any physical work). It claims again, gets `go`, and runs it once.
+- **No reply:** still unknown, so the step stays `running`.
+
+With the fix, a fresh reproduction completed: the job started 1.4s after the driver
+restarted, and the ledger has exactly one execution. I rejected a separate "what do you know
+about this job?" query, because the command already asks exactly that.
+
+**Trade-offs.** The claim costs one extra round trip per job. A driver that never comes back
+leaves its step `running` for ever (§5). The guarantee rests on one driver per instrument,
+with a ledger that survives restarts, and on one executor answering claims (assumed).
+
+### 2.4 Data counts only once verified; lost data stays open
+
+A read's bytes reach the driver only in memory, so the ledger saying `completed` is not
+enough. A read completes only once its stored object matches the ledger's hash (§1). Once
+verified, it stays `completed`: a later mismatch is reported in `error` instead, because steps
+after it may already have used the data.
+
+The harder case is a driver that crashes before its upload succeeds. The restarted driver
+finds no object, and reports `data_lost`. My first version failed the read after a grace
+period. On that version, the sequence below finished the run `failed`, and a late upload then
+contradicted the record. Nothing bounds how late a dead process's upload can land (inferred:
+neither S3 nor SeaweedFS promises it), so "absent now" is not "lost".
+
+So a lost read is now *unresolved*. The API says `running`, and `error` says an earlier upload
+may still appear. The plate reader reads the plate again at once, the executor checks storage
+for the original every 10s, and whichever attempt is verified first completes the step.
+
+C2 tested this rule (measured). I stopped storage mid-read, restarted the driver after the
+read, started storage again, then put the read's bytes at its key by hand, standing in for a
+late upload. The run stayed `running` until the object appeared, then completed within one
+10s check.
+
+Making loss final would need storage to refuse a late write. SeaweedFS 3.62 ignores
+`If-None-Match: *`: a second conditional PUT returned 200 and overwrote the object
+(measured). **Trade-off:** if every re-read also fails and the original never appears, the
+run stays `running` (§5). C2 ran before re-reads existed, so that path is covered by unit
+tests, not a live run.
+
+### 2.5 Retry only with a positive reason
+
+Without retries, every fault fails the run. A careless retry, though, could dispense liquid
+twice into the same plate. So a new attempt needs a statement that repeating is safe, from
+the right source for its cause:
+
+| Cause | Safe to repeat if | Default |
 | --- | --- | --- |
-| Failure | The instrument's `retryable` flag | Liquid handler: no. Incubator and plate reader: yes |
-| Hang | Per-device setting `REPEAT_SAFE` | Plate reader only |
-| Data lost | Per-device setting `REREAD_ON_DATA_LOSS` | Plate reader only |
+| The instrument failed | the instrument marks the failure `retryable` | liquid handler no; incubator and plate reader yes |
+| The instrument hung | the device is in `REPEAT_SAFE` | plate reader only |
+| A read's data was lost | the device is in `REREAD_ON_DATA_LOSS` | plate reader only |
 
-- **Limit:** at most 3 attempts in total (`MAX_ATTEMPTS`).
-- **No timers:** a hang is retried only after the instrument itself reports `hung`, so a
-  retry is never sent to a frozen instrument.
-- **A step is decided by all its attempts:**
-  - it is completed once any attempt is verified;
-  - it is failed only when every attempt has ended and no more will be made.
+- At most 3 attempts per step.
+- **No timers:** a hang is retried only after the instrument itself reports `hung`, so a retry
+  never goes to an instrument that is still frozen.
+- **A step is decided by all its attempts:** `completed` once any attempt is verified;
+  `failed` only when every attempt has ended and none will follow.
 
-**Instead of:**
-- *An operator decides every retry:* runs then never end on their own. Under any fault seed
-  that is measured, because the fault roll is deterministic.
-- *The instrument's flag only:* a hang carries no flag, so this can't decide the hardest
-  case.
-- *Treating the incubator as repeat-safe:* Triple Assay would then finish under hang faults,
-  but by incubating a plate twice for an unknown total time.
+In C3 (measured) a hung plate read was repeated 31ms after the ledger reported the hang, and
+completed. A hung `fill_sample_plate` on the liquid handler failed instead: "instrument hung;
+outcome unknown; not repeated: liquid-handler-1 is not safe to repeat". A hung dispense may
+have moved some, all or none of the liquid.
 
-**The trade:** with incubator or liquid-handler hangs on, runs fail ("outcome unknown; not
-repeated"). That is the honest answer. Which operations are safe to repeat on real equipment
-is a **guess**, which is why it's a setting and not code.
+**Alternatives.** If an operator decided every retry, runs would never end by themselves
+under faults. The instrument's flag alone can't decide a hang, because a hang has no flag.
+Treating the incubator as safe to repeat would let runs finish, but only by incubating a
+plate twice for an unknown total time.
 
-### D5. Cancel stops what has not started and keeps the evidence of what has
+**Trade-offs.** Which operations are safe to repeat on real equipment is a guess, so it is a
+setting per device, not code. Retries have no backoff. A retried step is two jobs in its
+ledger, so the acceptance script's check 5 ("no step ran more than once") fails on such runs,
+by design.
 
-- **One transaction:** the cancel locks every step of the run in a fixed order.
-- **Sent but not claimed:** cancelled. Claim and cancel take the same lock, so exactly one
-  wins.
-- **Claimed or running:** not stopped. Its late facts are still recorded.
-- **After the cancel:** no new attempts.
-- **Withdrawn claim (K54):**
-  - The case: a claim that was granted, but the driver died before starting.
-  - What happens: the restarted driver asks for the claim again. A driver only asks before
-    it runs, so the second request proves the job never started. The executor withdraws the
-    claim and answers `abort`.
-  - Measured live: the ledger has nothing for that job.
-- **Run status, rule 1:**
-  - `completed` if every step completed;
-  - `failed` if a step failed for its own reason;
-  - `cancelled` otherwise.
-- **Instead of:** "cancelled whenever a cancel was asked for". That would hide a failure that
-  happened anyway.
-- **Found by Codex:** the first version let a cancel relabel a failure that was final anyway
-  as "not retried: cancelled". Now the retry policy decides that, not the cancel.
+### 2.6 Cancel stops what hasn't started, and keeps what has
 
-### D6. GraphQL is a second view of the same rows
+`CancelRun` is one transaction. It locks every step of the run in a fixed order, so two such
+transactions can't deadlock, then:
 
-See §3.
+- a step sent but not claimed is cancelled, and a later claim for it gets `abort`;
+- a step not yet sent is cancelled, and is never sent;
+- a claimed or running step is **not** stopped (it may be moving liquid), and its outcome is
+  still recorded;
+- nothing is retried after the cancel.
+
+Once nothing is in flight, the run is `completed` if every step completed, `failed` if a step
+failed for its own reason, and `cancelled` otherwise. I rejected "cancelled whenever a cancel
+was requested", because it would hide a failure that happened anyway.
+
+**One hard case:** a claim granted to a driver that then died before starting. The resend
+(§2.3) would run the job once the driver is back, even after a cancel. A driver claims only
+before running a job its ledger doesn't have, so a second claim proves the job never
+started. After a cancel, that second claim is therefore withdrawn and answered `abort`.
+Measured live: the step ended `cancelled`, with nothing in the ledger. This relies on one
+executor answering claims in order (§5).
 
 ---
 
 ## 3. GraphQL schema
 
-`POST /graphql` on port 5002. The REST API is unchanged. The full SDL, with field
-descriptions, is at the top of `services/executor/graphql.go`. In short:
+`POST /graphql` on port 5002, alongside the unchanged REST API. This is the schema in
+`services/executor/graphql.go` without its field descriptions. It is valid SDL, and parses to
+the same types, fields and enum values:
 
 ```graphql
+scalar Time
+
 type Query {
-  run(id: ID!): Run                       # null if unknown
-  runs(status: RunStatus): [Run!]!        # newest first
+  run(id: ID!): Run                  # null if there is no such run
+  runs(status: RunStatus): [Run!]!   # newest first
   workflows: [Workflow!]!
 }
+
 type Mutation {
   createRun(workflowName: String): Run!
   startRun(id: ID!): Run!
-  cancelRun(id: ID!): Run!
+  cancelRun(id: ID!): Run!           # stops what hasn't started
 }
-type Run  { id workflowName status createdAt startedAt finishedAt
-            cancelRequested: Boolean!     # may still be running: claimed work isn't stopped
-            steps: [Step!]! }
-type Step { name device dependsOn status   # status and times exactly as REST
-            phase: StepPhase!             # DISPATCHED CLAIMED RUNNING STORING UNRESOLVED ENDED …
-            startedAt finishedAt error dataRef
-            attempts: [Attempt!]! }       # every attempt, first first
-type Attempt { number jobId phase decided claimed
-               outcome: Outcome           # COMPLETED FAILED HUNG; null until the ledger says
-               startedAt finishedAt       # the ledger's times for this attempt
-               instrumentError retryable unresolved
-               data: AttemptData }        # reads only
-type AttemptData  { ledgerSha256 verified dataLost checks: [StorageCheck!]! }
-type StorageCheck { ref sha256 matches at }  # `at` is the executor's clock, not the ledger's
+
+type Workflow { name: String!  isDefault: Boolean!  steps: [String!]! }
+
+type Run {
+  id: ID!  workflowName: String!  status: RunStatus!
+  cancelRequested: Boolean!          # it may still be running: claimed work isn't stopped
+  createdAt: Time!  startedAt: Time  finishedAt: Time
+  steps: [Step!]!
+}
+
+type Step {
+  name: String!  device: String!  dependsOn: [String!]!
+  status: StepStatus!                # exactly as REST, like the times, error and dataRef
+  phase: StepPhase!                  # finer than status
+  startedAt: Time  finishedAt: Time  error: String  dataRef: String
+  attempts: [Attempt!]!              # every attempt, first first
+}
+
+type Attempt {
+  number: Int!  jobId: ID!  phase: AttemptPhase!
+  decided: Boolean!  claimed: Boolean!
+  outcome: Outcome                   # null until the ledger says
+  startedAt: Time  finishedAt: Time  # this attempt's ledger times
+  instrumentError: String  retryable: Boolean!  unresolved: String
+  data: AttemptData                  # reads only
+}
+
+type AttemptData { ledgerSha256: String  verified: Boolean!  dataLost: Boolean!  checks: [StorageCheck!]! }
+type StorageCheck { ref: String!  sha256: String!  matches: Boolean!  at: Time! }  # at: the executor's clock
+
+enum RunStatus    { PENDING RUNNING COMPLETED FAILED CANCELLED }
+enum StepStatus   { PENDING RUNNING COMPLETED FAILED CANCELLED }
+enum StepPhase    { PENDING DISPATCHED RETRYING CLAIMED RUNNING STORING UNRESOLVED ENDED COMPLETED FAILED CANCELLED }
+enum AttemptPhase { DISPATCHED CLAIMED RUNNING STORING UNRESOLVED COMPLETED FAILED CANCELLED }
+enum Outcome      { COMPLETED FAILED HUNG }
 ```
 
 Errors carry `extensions.code`: `NOT_FOUND`, `BAD_USER_INPUT`, `WORKFLOWS_INVALID` or
-`INTERNAL`. Internal detail goes only to the log, as in REST.
+`INTERNAL`.
 
 **Why this shape:**
 
-- **It can't contradict REST.**
-  - It keeps no state of its own: a step's fields are the same columns REST reads, and
-    `attempts` is the lifecycle stored in the same row.
-  - A run and all its steps are read in one repeatable-read snapshot.
-  - Mutations are the same `Executor` methods.
-- **It carries what REST's fixed shape can't:**
-  - **Every attempt with its own ledger times.** In C3 and C4c a hung first read held the
-    plate reader for 30s (C3) and about 5s (C4c), and REST only shows the attempt that
-    decided the step (K53). Measured live: three hung attempts in GraphQL matched three ledger
-    executions, while REST's `/timeline` showed only the last.
-  - **The data evidence:** the ledger's digest and every storage read-back, with `matches`.
-    A corruption warning on a completed read then has its own field, instead of sharing
-    `error` with two other meanings (K1).
-  - **`phase`:** a scientist can tell "sent, not yet started" (a cancel still stops it) from
-    "claimed" (it won't), and "storing" from "running".
-- **Kept small:**
-  - Three queries and three mutations, covering what tools need: start runs and follow them.
-  - No subscriptions: tools poll `run(id)`. A subscription needs a websocket transport and a
-    change feed the executor doesn't have, and polling a snapshot is enough for runs that
-    take seconds to minutes.
-  - No pagination yet (K60).
-- **Library:** `graph-gophers/graphql-go`. It is schema-first, so the SDL is the design I
-  defend, and the resolvers are plain struct fields. gqlgen would have added a generator
-  and thousands of generated lines.
+- **It can't contradict REST.** It has no state of its own. Steps are the same rows REST
+  reads, and a run and its steps are read in one repeatable-read snapshot. Mutations call the
+  same `Executor` methods.
+- **It adds what REST's fixed shape can't show:**
+  - Every attempt, with its own ledger times. After a retry, REST shows only the attempt that
+    decided the step, so in C3 a 30s hung read on the plate reader was invisible. Measured:
+    three hung attempts in GraphQL matched three ledger executions.
+  - For a read, the ledger's hash and every storage read-back, with `matches`.
+  - The internal `phase`, which tells "sent" (a cancel still stops it) from "claimed" (it
+    won't).
+- **Small, and polling:** three queries and three mutations, enough to start runs and follow
+  them. Subscriptions would need a websocket transport and a change feed the executor doesn't
+  have, and runs take seconds to minutes.
+- **`graph-gophers/graphql-go`,** schema-first, so the schema is the design and resolvers are
+  plain struct fields. gqlgen would add a code generator and thousands of generated lines.
 
 ---
 
 ## 4. What I did to break it
 
-### Method
+Each experiment: write the prediction down, inject the fault, compare the record with every
+ledger and with storage, and log where the prediction was wrong. From C4 on,
+`scripts/check-run.py` does the comparison: outcomes and times against the ledgers, every
+ledger execution present in the record, no job run twice, and every read's object matching
+its hash. I tested the checker against six kinds of doctored ledger; it caught all six.
 
-Each experiment followed the same steps:
-1. Write the prediction down first.
-2. Inject the fault.
-3. Compare the record with every ledger and with storage.
-4. Log it, including where the prediction was wrong.
+The instrument picks faults from `sha256(seed:device:step:attempt)`, with no run id. So
+under one seed every run meets the same faults, and only a retry rolls again (measured). I
+used this to choose seeds that exercise a given path.
 
-From C4 on, `scripts/check-run.py` does step 3. For every step and attempt, it checks:
-- the outcome and times match the ledger;
-- every ledger execution is an attempt in the record;
-- no job ran twice;
-- every completed read's object has the ledger's hash.
-
-The checker was itself tested against doctored ledgers, and it flagged all six kinds of
-mismatch.
-
-### Experiments
-
-| | Fault | What I saw | What changed because of it |
+| | Fault | Result | What changed |
 | --- | --- | --- | --- |
-| **C1** | Partition of a bare NATS client: default and 2s pings, 6s and 20s | Prediction wrong twice. Late, not lost, with default pings; 7 of 8 "timed-out" JetStream publishes were stored | The whole of D1: claim, same-id resend, Msg-Id, explicit pings |
-| **C2** | Storage stopped mid-read, plate reader restarted before its upload, a late upload put back by hand | Driver retried, then reported `data_lost` after restarting. The read stayed open, and the late object completed it within one recheck | D3. The first version had failed the run, and the late upload then contradicted the record |
-| **C3** | `LH/INC/PR_HANG_PCT=30`, `CHAOS_SEED=0` and `17` | Every prediction held. Hung liquid-handler and incubator steps failed with "not repeated"; a hung plate read was repeated and completed | K53: REST hides an earlier attempt's device time. Fixed in GraphQL (§3) |
-| **C4** | 26 runs: executor killed mid-step and mid-read; each driver killed mid-job or idle; executor and plate reader partitioned; storage down 15s; `chaos.sh random --seed 7` and `--seed 11`; the same with instrument faults at `CHAOS_SEED` 3, 13 and 29 (chosen from a computed roll table) | **Every record true** (`check-run.py`: 26 ok, 0 problems). A driver killed mid-job: its ledger closes the job `hung` at the restart; the plate reader retried it, the liquid handler failed the step with its reason | K62 logged, not fixed: it is latency, not truth |
+| C1 | NATS client cut off, 6s and 20s, default and 2s pings | Timeouts don't mean "not delivered" | The messaging design (§2.1–2.3) |
+| C2 | Storage stopped mid-read, driver restarted before upload, late upload by hand | The read stayed open and completed once the object appeared. On the first version the same sequence failed the run, and the upload then contradicted it | Lost data stays open (§2.4) |
+| C3 | 30% hangs on every device, seeds 0 and 17 | Every prediction held; all records true | GraphQL shows every attempt (§3) |
+| C4 | 26 runs: executor and drivers killed mid-step or idle; executor and plate reader cut off; storage down 15s; `chaos.sh random` with seeds 7 and 11; instrument faults at seeds 3, 13, 29 | **All 26 records true** (`check-run.py`: 0 problems). A driver killed mid-job is marked `hung` at its restart: the plate reader retried it, the liquid handler failed the step with its reason | One latency issue logged, not fixed (below) |
 
-**Exact C4 commands:**
-- **One fault per run:** `scripts/experiments/c4-fault.sh <a-h>`.
-- **Random faults:** `FOR=90 scripts/experiments/c4-random.sh <seed> <out>`.
-- **Instrument faults:** set by
-  `CHAOS_SEED=13 INC_FAIL_PCT=20 PR_HANG_PCT=30 HANG_DURATION=5s docker compose up -d liquid-handler-1 incubator-1 plate-reader-1`.
+To repeat C4: `scripts/experiments/c4-fault.sh <a-h>` (one fault per run) and
+`FOR=90 scripts/experiments/c4-random.sh <seed> <out>` (random chaos, runs back to back),
+with instrument faults set by, for example,
+`CHAOS_SEED=13 INC_FAIL_PCT=20 PR_HANG_PCT=30 HANG_DURATION=5s docker compose up -d liquid-handler-1 incubator-1 plate-reader-1`.
+C1's probe was a local script, not committed, so C1 can't be fully rerun from the repo.
 
-### Where my predictions were wrong in C4
+**Where C4 proved me wrong: time, never truth.**
 
-C4's wrong predictions were about time, not truth:
+- **An 8s executor cut delayed the run by 30s.** The run took 41s, against about 11s
+  predicted. Watching the consumer showed two events "delivered, not acked" for exactly the
+  30s ack wait. They had been handed to the executor's pull request as it was cut off. The
+  record said `running` for steps that had ended: behind, not false. A shorter ack wait would
+  reduce this.
+- **The storage outage cost more than its length.** Storage was down 15s, but the read
+  completed 17s after storage was started again. SeaweedFS logged "wait to connect to filer"
+  for about 16s, and the driver's upload succeeded on its next retry. I infer that shorter
+  outages pay the same restart cost, but I measured only this one.
 
-- **An 8s executor partition delayed the run by about 30s.**
-  - Measured: two events sat `ack_pending` on the consumer for exactly `ackWait`.
-  - Why: they had been handed to the executor's pull request just as it was cut off, so
-    JetStream only redelivered them after `ackWait`.
-  - Meanwhile the record said `running` for steps already finished: behind, not false (K62).
-- **A storage outage of any length costs at least about 16s.** SeaweedFS needs that long to
-  serve S3 again. The driver's upload succeeded on its next 0.5s retry.
-- **The first instrument-fault seed was a vague prediction.** I hadn't computed the roll. The
-  roll depends on seed, device, step and attempt, never the run, so one seed gives every run
-  the same faults.
-
-### Other checks behind each change
-
-- **A failing test first.** Every behaviour started as one.
-- **Mutation checks:** deliberately broken versions of the code, to confirm the tests catch
-  them.
-- **`go test -race ./...`.** It catches a driver bug the plain suite misses (K44).
-- **`acceptance.sh`** after every slice. It passes 7/7 on both workflows with faults off.
+**Other checks on every change:** a check written first; mutation checks (deliberately broken
+code, to confirm the tests catch it); `go test -race ./...`; and `acceptance.sh`, which passes
+7/7 on both workflows with faults off.
 
 ---
 
 ## 5. What is still not true, or not proven
 
-None of these makes the record say something false. They are liveness, assumptions, and
-things not proven.
+None of these makes the record false. Detail and possible fixes are in
+[`docs/forengineer/concerns.md`](docs/forengineer/concerns.md).
 
-### Deliberate boundaries
+**Boundaries I drew on purpose:**
 
-- **Work already started is never stopped.** Not by a cancel, and not by a timer. Only its
-  evidence says how it ended.
-- **No operator tools** (K6, K39). The consequence:
-  - A read whose data was lost, and whose re-reads also failed or lost their data, stays
-    `running` for ever.
-  - That is true: an earlier upload may still land, and SeaweedFS can't make loss final
-    (D3). But a run can then never end.
-  - The fix is designed (D4: an `abandonStep` mutation) but not built.
-- **A driver that never comes back** leaves its claimed step `running`. It is unknown, so
-  the record says so (K6).
-- **Times of a crashed attempt** end at the instrument's restart, not when work actually
-  stopped. That is the ledger's time, the best evidence there is.
+- **A run can stay `running` for ever** when the outcome is truly unknown: a driver that
+  never comes back, or a lost read whose re-reads all fail while the original never appears.
+  The fix is an operator action that marks the step `failed` with the reason. It was designed
+  but not built.
+- **Work that has started is never stopped,** by a cancel or a timer.
 
-### Assumptions the guarantees rest on
+**Assumptions:**
 
-- **One driver process per instrument, and a ledger that survives restarts (K55).**
-  "Resending never runs a job twice" depends on both.
-- **One executor (K56).** Withdrawing a claim after a cancel assumes one executor answers a
-  driver's claims in order. With replicas, a stalled claim could withdraw an attempt that is
-  running. The fix would be for drivers to number their claims.
-- **The instrument's end-of-job ledger write succeeds (K16).** If it fails, the instrument
-  says `completed` now, but a restarted instrument says `hung`. That can't be seen from
-  outside the instrument (`instrument.go:241`).
-- **A single NATS server, no retention limits on `LAB_EVENTS` (K22), and no rolling
-  upgrade.** A v2 driver against a v1 executor is rejected: it fails safe (K14).
+- **One driver per instrument, with a ledger that survives restarts.** "A resend never runs a
+  job twice" depends on both.
+- **One executor.** With two, a stalled first claim could look like a re-claim after a cancel
+  and withdraw a running attempt. Numbered claims would fix it.
+- **The instrument's end-of-job ledger write succeeds.** If it failed, a restart would report
+  `hung` for a job we recorded as completed (`instrument.go:241`, inferred).
+- **One NATS server,** no retention limit on `LAB_EVENTS`, and no rolling upgrades.
 
-### Known gaps
+**Known gaps:**
 
-- **`acceptance.sh` check 5** ("no step ran more than once") fails on any run that retried
-  (K5). Each attempt is its own ledger execution, by design. The check is meant for the
-  happy path, and it passes there.
-- **REST `GET /runs/{id}` doesn't read from one snapshot (K59).** For one poll it can show a
-  run and its steps from different moments, such as `running` beside steps that have all
-  ended. GraphQL reads in a snapshot.
-- **`createRun` has no idempotency key (K58).** A tool that retries after a lost response
-  creates a second run.
-- **A partition of the executor costs up to 30s** (`ackWait`, K62). A retry after a failure
-  is immediate, with no backoff (K51).
-- **Step and attempt times differ below 1µs (K61):** Postgres stores microseconds; the
-  lifecycle keeps the ledger's nanoseconds.
+- Delivery is at least once, and the record can lag: up to 30s after an executor network cut,
+  and by storage's own restart time after an outage.
+- REST `GET /runs/{id}` isn't read from one snapshot, so for one poll a run can look `running`
+  beside steps that have all ended. GraphQL is.
+- `createRun` isn't idempotent: a client retrying after a lost reply creates two runs.
+- Retries have no backoff, and acceptance check 5 fails on retried runs.
 
-### Not proven
+**Not proven:**
 
-- **C1 can't be fully rerun from the repo.** Its probe was a local-only script (K8).
-- **C2 ran before D4.** Today a lost read is also re-read at once. Unit tests cover that, but
-  it hasn't been re-run live.
-- **Several runs competing for one device.** Chaos ran runs back to back, not concurrently.
-  There is no fairness across runs (K29).
-- **Scale.** The dispatch loop rescans running runs every 500ms, replay sends the whole
-  ledger on every start, and lost reads are rechecked every 10s for ever. All fine at three
-  devices, not measured beyond (K20, K28, K35, K40, K50).
-- **One test gap (K38).** That replay uses the ledger as it was before listening is shown by
-  the code, not by a test.
-
-The full list, with what each would take, is in `docs/forengineer/concerns.md`: 29 open, 9 accepted.
+- The re-read after lost data was not run live, only in unit tests.
+- Several runs competing for one device: chaos ran runs back to back, not concurrently.
+- Scale beyond three devices: the dispatch loop rescans running runs every 500ms, and replay
+  resends a driver's whole ledger on every start.
 
 ---
 
 ## 6. How long I spent
 
-<!-- TODO(user): total time actually spent, roughly. Not derived from commit times. -->
+The project took roughly 10 hours overall, including AI-assisted implementation, testing and review cycles.
 
-_To be filled in._
+My own active time was around 4–5 hours, mainly spent on architecture, evaluating design alternatives, making decisions, reviewing results, investigating failures and refining the AI development workflow.
 
 ---
 
 ## What I thought of the exercise
 
-<!-- TODO(user): what was unclear, what was annoying, what you would change. -->
+I enjoyed the exercise. It reminded me of some of my earlier work on industrial control systems and communication protocols, where you have to be careful about what happens when software interacts with physical equipment. A timeout doesn't mean an operation didn't happen, and getting that wrong can have real consequences.
 
-_To be filled in._
+One thing I found interesting was how much the way I worked with AI affected the result. At the beginning, I moved a bit too quickly and followed an architecture suggested by AI. After thinking through some failure scenarios, I realised parts of it didn't really make sense. I went back, explored the alternatives more carefully, and started using interactive HTML diagrams to help discuss and understand the design. That was useful, especially for getting the core architecture right before building more on top of it.
+
+I also spent time setting up and refining the project-specific skills and development workflow. I think this is an important part of working with AI, not just something to do once at the start. On a real project, I'd spend more time improving these workflows as the team learns, capturing what works and making it reusable for others. A good setup helps keep the work consistent, but it also needs to evolve.
+
+AI can take on a lot of the implementation, testing and documentation work. But I still think the important design decisions need to be owned by engineers. It's easy to accept something that looks reasonable at first, so being willing to question it, test it and change direction matters.
+
+I particularly liked the chaos tools and instrument ledgers. They gave me a way to check whether the system actually behaved as expected, rather than just trusting the code or the explanation. A few experiments proved my initial assumptions wrong, which was probably the most useful part of the exercise.
+
+Overall, I liked that the exercise gave me room to explore different approaches, make trade-offs and change my mind based on evidence.
 
 ---
 
 ## AI use
 
-- **Claude Code wrote the code and the docs.** It worked to the conventions in `CLAUDE.md`
-  and the `/decide`, `/slice` and `/break` skills in `.claude/skills/`.
-- **I made every design decision and reviewed every PR.** Each design fork was a `/decide`,
-  with the alternatives argued before I chose, and several were reversed in my review:
-  - D3's first version failed a lost read after a grace period;
-  - D4's first draft used one retry trigger for all causes, and treated the incubator as
-    repeat-safe;
-  - for D5's run status, rule 2 was rejected because it hides a failure that happened anyway.
-- **Codex** reviewed each PR read-only, once (`scripts/codex-review.sh`). Its findings and how
-  each was handled are in the PR descriptions and `docs/forengineer/concerns.md`.
+### How we set up the work
+
+Before writing any code, we spent time on `CLAUDE.md` and three project skills in
+`.claude/skills/`. With an AI writing most of the code, the risk is code that looks right and
+makes claims nobody has checked. That is the same failure the run record must avoid. So
+`CLAUDE.md` states the invariant (the record must be true, the ledger is the evidence) and a
+review checklist for every message and state change: what if it arrives twice, late or never,
+or the process restarts halfway? Each skill makes one kind of work produce evidence:
+
+- **`/decide`** was used for the two biggest forks, messaging and retries. It set out two or
+  three real alternatives and the assumption each rests on, and settled facts by experiment
+  where it could, before I chose. C1 came before the messaging design, and measuring that the
+  fault roll ignores the run id came before the retry design. Smaller forks, such as cancel and
+  GraphQL, were argued the same way inside their slices. All are in the decisions log.
+- **`/slice`** kept each change to one behaviour and one PR into `dev`. Each started from a
+  check that failed first, passed `go test -race` and the acceptance script, and was reviewed
+  once by Codex. It ended with an explanation I could check before merging. Reviewing those
+  explanations and decision records is where the reversals below came from.
+- **`/break`** made each experiment start with a written prediction, and end with the record
+  compared against the instrument ledgers and storage, not the API's word. That comparison
+  became `scripts/check-run.py`. Wrong predictions were logged as findings, such as the 30s
+  ack wait in §4.
+
+None of this was about generating code faster. It kept each claim, in the code and in these
+notes, tied to evidence.
+
+### Who did what
+
+- **Claude Code** wrote the code, tests, scripts and documentation, including this note and
+  the HTML explainers. It followed `CLAUDE.md` and the `/decide`, `/slice` and `/break`
+  skills in `.claude/skills/`.
+- **I made the design decisions, and reviewed and merged every PR.** Each design fork was
+  argued with its alternatives before I chose. Several first versions were changed in my
+  review:
+  - lost data was failed after a grace period;
+  - one retry trigger covered every cause, with the incubator treated as safe to repeat;
+  - a run counted as cancelled even when a step had failed on its own.
+- **Codex** reviewed each slice PR once, read-only (`scripts/codex-review.sh`). Its findings,
+  and how each was handled, are in the PR descriptions. One changed the cancel design: a
+  cancel could relabel a failure that was final anyway as "not retried: cancelled".
 - **The conversations are in `ai/`.**
   <!-- TODO(user): export, review for anything private, and say here if anything was left out. -->
