@@ -7,6 +7,14 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
 | Session | Start | End | Notes |
 | --- | --- | --- | --- |
 | 1 | 2026-10-25 | 2026-10-26 | exploration, repo setup, working process, D1 + disconnect experiment |
+| 2 | 2026-10-26 09:xx | 2026-10-26 14:10 | S1–S6, R1 (PRs #4–#11) |
+| 3 | 2026-10-27 00:13 | 2026-10-27 02:xx | D4 and its slices, C3, S7 (PRs #12–#18) |
+| 4 | 2026-10-27 08:xx | 2026-10-27 10:xx | cancel, GraphQL, C4, docs review (PRs #19–#22) |
+
+Sessions 2–4 were added in the review, from commit times (local clock): first and last commit
+of each burst. A session starts before its first commit, so the real start is earlier and
+marked `xx`. The commit span is about 10.5h in total. **The user confirms the actual time
+spent for NOTES.md §6**; this table is a lower bound, not a measurement.
 
 ## Template
 
@@ -130,6 +138,14 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
     a step is claimed with no evidence (S7). The command already asks the driver what it
     knows of the job, and its idempotence (`known`) is what makes the resend safe, so a
     query would add a subject and driver code to learn nothing more.
+  - (Review 2026-10-27) Superseded lines above:
+    - "Nothing retries automatically yet" and, in Known limits, "no automatic re-read yet":
+      D4 now retries (PRs #13–#16). A lost read is re-read at once on a device with
+      `reread_on_data_loss`.
+    - Internal phases also include `retrying` and `ended` (D4).
+    - "Failed if one failed" is now D5's rule 1: `failed` only if a step failed for its own
+      reason, `cancelled` if the cancel is why the rest didn't happen.
+    - "Single executor" is now also an assumption the withdrawn claim rests on (K56).
 
 ## D2. A verified completion is never undone; later storage problems are reported
 
@@ -147,7 +163,8 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
 - **Rests on:** evidence is a set of read-backs, so "some check matched" does not depend on
   arrival order (tested over all orderings).
 - **Would revisit if:** we need data integrity as its own field (GraphQL could expose it
-  instead of overloading `error`).
+  instead of overloading `error`). (Review 2026-10-27: done in D6. `Attempt.data` has
+  `verified` and every check with `matches`; REST's `error` is unchanged.)
 - **Slice / PR:** S1, step lifecycle.
 
 ## D3. A read reported lost stays unresolved; only storage, or a decision, settles it
@@ -174,6 +191,11 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
   then tombstone-and-arbitrate, and lost becomes final); or runs must end on their own
   (then a retry policy ends them, not a guess).
 - **Slice / PR:** R1 (PR #11), after review.
+- **Review 2026-10-27:**
+  - Of the two decisions named in Chosen, the re-read was built (D4, PR #16). The operator
+    one was not (K6, K39).
+  - C2, the experiment behind D3, ran before D4. Today the same sequence also starts a
+    re-read at once (unit test `TestLostReadIsReadAgain`; not re-run live).
 
 ## D4. Retry per cause and per device, bounded; a step is decided by all its attempts
 
@@ -197,7 +219,10 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
   - **Data lost:** a re-read at once, alongside the still-open attempt (D3), on a device with
     `reread_on_data_loss`. Don't wait for the late upload; D3 found no limit on that wait.
   - At most 3 attempts per step, shared by all causes.
-  - **Cancel, as D1 has it, applied to attempts:**
+  - **Cancel, as D1 has it, applied to attempts** (review 2026-10-27: two points below are
+    refined by D5. "Never claimed" became "never ran": a claim withdrawn after a cancel
+    doesn't count (K54). And "not retried: cancelled" is the reason only if the policy would
+    have retried; otherwise the failure keeps its own reason):
     - A cancel is our intent on the step, recorded whatever state the step is in: no new
       attempt is dispatched after it. Retry and cancel both take the step's row lock, so
       one of them is first, as claim and cancel are in D1.
@@ -266,11 +291,13 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
 - **Known limits:** a step whose re-reads all fail after a data loss stays `running` (K39,
   narrower; operator abandon deferred, above); a retry fails acceptance check 5 under faults
   (K5); a re-read is a different measurement, taken later; what a run's own status is after a
-  cancel is left to the cancel slice (K42).
+  cancel is left to the cancel slice (K42; review 2026-10-27: settled by D5).
   Explainers: `tmp/d4-hang-retry.html` (v1), `tmp/d4-hang-retry-v2.html`.
-- **Slice / PR:** this PR records it. Slices follow: protocol (`retryable`), lifecycle
-  (attempts, the all-attempts rule), store (lookup by job id), policy (config, retries), then
-  a `/break` run with hang faults.
+- **Slice / PR:** recorded in #12. Built in #13 (protocol `retryable`), #14 (lifecycle:
+  attempts, the all-attempts rule), #15 (store lookup by job id) and #16 (policy). Tested by
+  C3 (#17).
+- **Review 2026-10-27:** the deferred `abandonStep` was not built, so K39 stays open. GraphQL
+  (D6) has no mutation for it.
 
 ## D5. Cancel: stop what has not started, keep the evidence of what has; the run says why it stopped
 
@@ -318,7 +345,7 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
   live in the S7/cancel PR.
 - **Known limits:** work already started is not stopped, by design. A cancelled run whose
   lost read never reappears stays `running` (K39; operator abandon is deferred).
-- **Slice / PR:** cancel slice.
+- **Slice / PR:** #19 (cancel slice).
 
 ## D6. GraphQL is a second view of the same rows: the REST record plus every attempt
 
@@ -359,4 +386,4 @@ Design decisions, newest last. Each one feeds NOTES.md §1–3.
     plate-reader attempts match the three ledger executions, while REST shows only the last.
 - **Would revisit if:** tools need push updates, or runs grow into the thousands (`runs` has
   no pagination, K60).
-- **Slice / PR:** GraphQL slice.
+- **Slice / PR:** #20 (GraphQL slice).

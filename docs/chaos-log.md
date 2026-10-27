@@ -76,6 +76,14 @@ One entry per experiment, newest last. Feeds NOTES.md §4–5.
   record can only hold the question open and keep looking.
 - **Follow-up:** D3, R1 (PR #11). Ending such a read is a decision: retry policy or
   operator "declare lost" (K39, K6).
+- **Review 2026-10-27:**
+  - Ran before D4. With today's defaults (`REREAD_ON_DATA_LOSS=plate-reader`), the
+    `data_lost` would also start `read_plate/2` at once, and the run would complete from
+    whichever attempt is verified first.
+  - Covered by `TestLostReadIsReadAgain` and `TestLostReadIsFoundWhileItsReReadIsStuck`;
+    not re-run live.
+  - `run-efacd6fdca88` and `run-8c366ff2ecb6` were discarded with the local database
+    (lifecycle slice), so this entry is their only record.
 
 ## C3. Hang faults on every device under D4 (retry policy)
 
@@ -172,6 +180,8 @@ One entry per experiment, newest last. Feeds NOTES.md §4–5.
 - **Follow-up:** no fix slice; the record was true. K53 goes to GraphQL (an attempts history
   per step) and possibly the timeline. K52 (acceptance check 5 against retried steps) still
   stands; acceptance wasn't run with faults on.
+- **Review 2026-10-27:** K53 is done in GraphQL (`Step.attempts`, #20). `/timeline` keeps
+  its fixed shape. C4c measured the same gap and showed both attempts through GraphQL.
 
 ## C4. Final pass: process crashes, partitions, a storage outage and random faults
 
