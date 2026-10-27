@@ -1,6 +1,6 @@
 ---
 name: break
-description: Run one chaos experiment against the lab automation stack. Predict first, inject the fault, compare the run record with the instrument ledgers, and log it in docs/chaos-log.md. Use when the user says /break, or to test whether a slice holds under faults.
+description: Run one chaos experiment against the lab automation stack. Predict first, inject the fault, compare the run record with the instrument ledgers, and log it in docs/forai/chaos-log.md. Use when the user says /break, or to test whether a slice holds under faults.
 ---
 
 # /break <fault>
@@ -34,7 +34,7 @@ An experiment, not poking around. The prediction comes before the run.
    claim success where the evidence says `hung` or is missing? Is anything stuck? Was the prediction right? A wrong
    prediction is a finding about our understanding, so say what we misunderstood.
 
-5. **Log it** in `docs/chaos-log.md` with the template there.
+5. **Log it** in `docs/forai/chaos-log.md` with the template there.
 
 6. **If the record was false or stuck**, propose the fix as a `/slice`, with this
    experiment as its check. Don't fix it inside `/break`.

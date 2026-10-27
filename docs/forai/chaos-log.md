@@ -1,5 +1,8 @@
 # Chaos log
 
+The working log, written during the work. The readable version is
+[`../forengineer/chaos-log.md`](../forengineer/chaos-log.md); update it when this changes.
+
 One entry per experiment, newest last. Feeds NOTES.md §4–5.
 
 ## Template
@@ -350,6 +353,6 @@ One entry per experiment, newest last. Feeds NOTES.md §4–5.
       stopped. That is the ledger's time, the best evidence there is.
 - **Follow-up:**
   - No fix slice: no record was false or stuck.
-  - K62 (ackWait latency after an executor partition) goes to `docs/concerns.md`.
+  - K62 (ackWait latency after an executor partition) goes to `docs/forai/concerns.md`.
   - `scripts/check-run.py` and `scripts/experiments/c4-*.sh` are committed so this can be
     rerun.

@@ -1,5 +1,8 @@
 # Concerns
 
+The working log, written during the work. The readable version, grouped by status and
+theme, is [`../forengineer/concerns.md`](../forengineer/concerns.md); update it when this changes.
+
 Things we noticed that don't block the current work. Blockers get fixed in the slice
 that finds them. These get solved later, or written up in NOTES.md §5 if we don't.
 

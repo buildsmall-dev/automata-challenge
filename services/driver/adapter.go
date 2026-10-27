@@ -290,7 +290,7 @@ func (d *driver) waitLedger(ctx context.Context, jobID string, r *run, cond func
 }
 
 // publish stores an event in the stream, retrying until JetStream acknowledges
-// it. A timed-out publish may still have been stored (docs/chaos-log.md C1), so
+// it. A timed-out publish may still have been stored (docs/forengineer/chaos-log.md C1), so
 // every retry carries the same Nats-Msg-Id and the server drops the repeat.
 func (d *driver) publish(ctx context.Context, ev protocol.Event) {
 	ev.V, ev.Device = protocol.Version, d.device

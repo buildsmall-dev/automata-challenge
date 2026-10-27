@@ -12,10 +12,11 @@ Where to find the detail behind this note:
 
 | | |
 | --- | --- |
-| `docs/decisions.md` | D1–D6: each design decision, its alternatives, and what it rests on |
-| `docs/chaos-log.md` | C1–C4: each experiment, predicted before it ran, then observed |
-| `docs/concerns.md` | K1–K62: everything noticed along the way, with a status (resolved, accepted, open) |
+| `docs/forengineer/decisions.md` | D1–D6: each design decision, its alternatives, and what it rests on |
+| `docs/forengineer/chaos-log.md` | C1–C4: each experiment, predicted before it ran, then observed |
+| `docs/forengineer/concerns.md` | K1–K62: everything noticed along the way, with a status (resolved, accepted, open) |
 | `docs/html/` | Explainers written for the two biggest decisions, D1 and D4 |
+| `docs/forai/` | The same three records as written during the work, with their history and review notes |
 | `scripts/check-run.py` | Compares a run's record with all three ledgers and with storage |
 
 The work went in through 22 PRs into `dev`. Each one carries a check that failed first, its
@@ -440,7 +441,7 @@ things not proven.
 - **One test gap (K38).** That replay uses the ledger as it was before listening is shown by
   the code, not by a test.
 
-The full list, with what each would take, is in `docs/concerns.md`: 29 open, 9 accepted.
+The full list, with what each would take, is in `docs/forengineer/concerns.md`: 29 open, 9 accepted.
 
 ---
 
@@ -471,6 +472,6 @@ _To be filled in._
     repeat-safe;
   - for D5's run status, rule 2 was rejected because it hides a failure that happened anyway.
 - **Codex** reviewed each PR read-only, once (`scripts/codex-review.sh`). Its findings and how
-  each was handled are in the PR descriptions and `docs/concerns.md`.
+  each was handled are in the PR descriptions and `docs/forengineer/concerns.md`.
 - **The conversations are in `ai/`.**
   <!-- TODO(user): export, review for anything private, and say here if anything was left out. -->

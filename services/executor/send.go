@@ -13,7 +13,7 @@ import (
 	"github.com/automata-tech/distributed-systems-interview/services/common/protocol"
 )
 
-// What the executor tells the drivers (docs/decisions.md D1). A loop moves each
+// What the executor tells the drivers (docs/forengineer/decisions.md D1). A loop moves each
 // running run forward: dispatch what the scheduler says is ready, send the
 // command for every dispatched step until there is evidence it started, and
 // finish the run once nothing is left in flight. Everything it acts on is read from

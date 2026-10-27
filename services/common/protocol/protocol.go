@@ -1,5 +1,5 @@
 // Package protocol is the wire contract between the executor and the drivers
-// (docs/decisions.md D1). Both sides build subjects, ids and messages only
+// (docs/forengineer/decisions.md D1). Both sides build subjects, ids and messages only
 // from here.
 //
 //	executor -> driver   request  lab.<device>.cmd.run   RunCommand  -> RunReply

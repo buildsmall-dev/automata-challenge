@@ -44,11 +44,11 @@ completed" is a claim, not evidence.
 
 ## Workflow
 
-- `/decide <question>` for a design fork. Recorded in `docs/decisions.md`.
+- `/decide <question>` for a design fork. Recorded in `docs/forai/decisions.md`.
 - `/slice <behaviour>` for one small change, built from a failing check, and opened as one PR.
-- `/break <fault>` for a chaos experiment. Recorded in `docs/chaos-log.md`.
+- `/break <fault>` for a chaos experiment. Recorded in `docs/forai/chaos-log.md`.
 - **Raise only blockers.** A finding that would make the record false, or the slice's
-  check meaningless, is fixed in the slice. Everything else goes in `docs/concerns.md`.
+  check meaningless, is fixed in the slice. Everything else goes in `docs/forai/concerns.md`.
 
 Git:
 - `main` holds the original challenge. `dev` is the integration branch.
@@ -83,6 +83,9 @@ go test -race ./...                                # unit tests, with the race d
 
 ## Bookkeeping for the submission
 
-- `docs/decisions.md` and `docs/chaos-log.md` are written as we go. They feed `NOTES.md`.
-- Log session start and end times in `docs/decisions.md`.
+- `docs/forai/decisions.md` and `docs/forai/chaos-log.md` are written as we go. They feed `NOTES.md`.
+- Log session start and end times in `docs/forai/decisions.md`.
+- `docs/forai/` is the working log, appended as we go. `docs/forengineer/` is the same content
+  rewritten for human readers (current state, grouped, terms explained). When an entry in
+  `forai/` changes, update its `forengineer/` counterpart in the same PR. IDs (D, K, C) match.
 - AI conversations are exported to `ai/`.
