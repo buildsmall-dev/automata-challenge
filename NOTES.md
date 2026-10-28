@@ -35,8 +35,10 @@ process can crash. The goal is that **the run record stays true** through all of
 
 Labels used below: **measured** (I ran it), **inferred** (from reading the code),
 **assumed** (the design depends on it; nothing here checks it). The full records are in
-[`docs/forengineer/`](docs/forengineer/) (decisions, experiments, concerns), and an
-interactive walkthrough is in [`docs/html/system-overview.html`](docs/html/system-overview.html).
+[`docs/forengineer/`](docs/forengineer/) (decisions, experiments, concerns). An interactive
+walkthrough is online at <https://buildsmall.dev/automata-602c85eba1b1/system-overview.html>.
+The same page is in the repo as [`docs/html/system-overview.html`](docs/html/system-overview.html):
+a self-contained HTML file with no dependencies, so it also works opened locally in a browser.
 
 ---
 
