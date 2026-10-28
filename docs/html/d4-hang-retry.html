@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hang and Retry Policy</title>
+<style>
+  :root {
+    --bg: #fbfaf7; --fg: #1f2328; --muted: #5d6470; --line: #d9d6cf; --card: #ffffff;
+    --accent: #2457a6; --ok: #1f7a43; --warn: #9a6200; --bad: #b3261e; --code: #f1efe9;
+    --okbg: #e7f4ec; --warnbg: #fbf1dc; --badbg: #fbe6e4; --accbg: #e6eefa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16181c; --fg: #e6e6e3; --muted: #a0a6b0; --line: #343840; --card: #1d2026;
+      --accent: #7aa7ec; --ok: #6cc28f; --warn: #e2b04f; --bad: #f08a80; --code: #262a31;
+      --okbg: #1c2f24; --warnbg: #33291a; --badbg: #3a1f1d; --accbg: #1d2a3d;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #16181c; --fg: #e6e6e3; --muted: #a0a6b0; --line: #343840; --card: #1d2026;
+    --accent: #7aa7ec; --ok: #6cc28f; --warn: #e2b04f; --bad: #f08a80; --code: #262a31;
+    --okbg: #1c2f24; --warnbg: #33291a; --badbg: #3a1f1d; --accbg: #1d2a3d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 32px 16px 80px; }
+  h1 { font-size: 1.8rem; line-height: 1.2; margin: 0 0 8px; }
+  h2 { font-size: 1.3rem; margin: 48px 0 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+  h3 { font-size: 1.05rem; margin: 24px 0 8px; }
+  p, li { max-width: 72ch; }
+  .lede { color: var(--muted); font-size: 1.05rem; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: .9em; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: 14px 0; }
+  .tag { display: inline-block; font-size: .75rem; font-weight: 600; padding: 1px 8px; border-radius: 99px; vertical-align: middle; }
+  .measured { background: var(--okbg); color: var(--ok); }
+  .inferred { background: var(--accbg); color: var(--accent); }
+  .guess { background: var(--warnbg); color: var(--warn); }
+  .ok { color: var(--ok); font-weight: 600; }
+  .warn { color: var(--warn); font-weight: 600; }
+  .bad { color: var(--bad); font-weight: 600; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: .92rem; margin: 10px 0; }
+  th, td { border: 1px solid var(--line); padding: 7px 9px; text-align: left; vertical-align: top; }
+  th { background: var(--code); }
+  td.hang { background: var(--badbg); color: var(--bad); font-weight: 600; }
+  td.fine { color: var(--muted); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+  .grid .card { margin: 0; }
+  .callout { border-left: 4px solid var(--accent); background: var(--accbg); padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 16px 0; }
+  .callout.warnc { border-color: var(--warn); background: var(--warnbg); }
+  svg { width: 100%; height: auto; display: block; }
+  svg text { fill: var(--fg); font: 13px system-ui, sans-serif; }
+  svg .muted { fill: var(--muted); }
+  .steps { counter-reset: s; list-style: none; padding: 0; }
+  .steps li { counter-increment: s; position: relative; padding-left: 36px; margin: 8px 0; }
+  .steps li::before { content: counter(s); position: absolute; left: 0; top: 1px; width: 24px; height: 24px;
+    border-radius: 50%; background: var(--accent); color: var(--bg); font-size: .8rem; font-weight: 700;
+    display: flex; align-items: center; justify-content: center; }
+  nav { font-size: .92rem; }
+  nav a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Hang and retry policy</h1>
+<p class="lede">What ends a step that cannot succeed as it stands, and when we try it again.
+An explainer for the D4 decision. Nothing here is built yet.</p>
+
+<nav class="card">
+  <strong>On this page</strong>
+  <ol>
+    <li><a href="#problem">The problem: three ways a step gets stuck</a></li>
+    <li><a href="#words">Words we need: attempt, job, ledger, repeat-safe</a></li>
+    <li><a href="#facts">What the instrument actually does</a></li>
+    <li><a href="#rolls">The measurement: faults are the same in every run</a></li>
+    <li><a href="#options">The three options</a></li>
+    <li><a href="#scenarios">Every scenario under every option</a></li>
+    <li><a href="#walk">Walk-through: a hung incubation under option B</a></li>
+    <li><a href="#history">What the record looks like with attempts</a></li>
+    <li><a href="#status">The open question: what status does a final hang get?</a></li>
+    <li><a href="#cost">What it costs to build</a></li>
+    <li><a href="#decide">What you are deciding</a></li>
+  </ol>
+</nav>
+
+<h2 id="problem">1. The problem: three ways a step gets stuck</h2>
+<p>Every step the executor sends can end in one of a few ways. Most are already handled:
+<span class="ok">completed</span> (with verified data, for a read) and
+<span class="bad">failed</span> (the instrument reported an error). Three cases are not handled.
+Today each leaves its step, and so its whole run, stuck:</p>
+
+<div class="grid">
+  <div class="card">
+    <strong>Hung</strong>
+    <p>The instrument hangs, frees itself after 30s, and writes <code>hung</code> in its ledger.
+    Our driver reports <code>finished(hung)</code>. The step becomes <em>unresolved</em>
+    (API: <code>running</code>) and stays that way forever.</p>
+  </div>
+  <div class="card">
+    <strong>Data lost</strong>
+    <p>The plate reader completed the read, but the bytes died with a driver restart. Under D3
+    the read stays <em>unresolved</em> in case a late upload lands. Nothing ever ends it.</p>
+  </div>
+  <div class="card">
+    <strong>Failed</strong>
+    <p>The instrument reported an error. The step is <code>failed</code> and the run fails,
+    even when the instrument itself said "this can be retried".</p>
+  </div>
+</div>
+
+<p>A fourth case, <strong>claimed but never started</strong> (the driver died between the claim
+and pressing start), is not part of this decision. Nothing physical happened, so the fix is
+to resend the <em>same</em> job, not start a new attempt. That is reconcile (S7).</p>
+
+<div class="callout">
+<strong>Why this matters for truth.</strong> A step that says <code>running</code> forever after
+the instrument stopped is a claim that is no longer true. A careless retry can be physically
+wrong: if a hung liquid handler did dispense, a retry dispenses twice. So the policy has to
+be both <em>live</em> (runs end) and <em>safe</em> (nothing is repeated that should not be).
+</div>
+
+<h2 id="words">2. Words we need</h2>
+<div class="card">
+<dl>
+  <dt><strong>Attempt</strong></dt>
+  <dd>One try at one step. Attempt 1 is the first. A retry is attempt 2, and so on.</dd>
+  <dt><strong>Job id</strong></dt>
+  <dd><code>run/step/attempt</code>, e.g. <code>run-8c36/read_plate/2</code>. The instrument
+  records it in its ledger. A repeated command for the <em>same</em> job is recognised and
+  never runs twice (the driver answers <code>known</code>). A <em>new attempt</em> has a new
+  job id, so it does run again. That is the whole point of a retry, and also its danger.</dd>
+  <dt><strong>Ledger</strong></dt>
+  <dd>The instrument's own diary: one entry per physical execution, with
+  <code>completed / failed / hung</code> and times. Our best evidence.</dd>
+  <dt><strong>Repeat-safe</strong></dt>
+  <dd>A property of a device's operation: doing it again after an unknown outcome does no
+  harm. Reading a plate is (it only looks). Dispensing liquid is not (you cannot un-dispense).
+  Incubating is probably safe for a short extra time, but that is a <span class="tag guess">guess</span>
+  about real chemistry.</dd>
+</dl>
+</div>
+
+<h2 id="facts">3. What the instrument actually does</h2>
+<table>
+  <tr><th>Fact</th><th>Source</th><th>Kind</th></tr>
+  <tr><td>A hanging step never returns from <code>Run</code>. The instrument frees itself after
+    <code>HANG_DURATION</code> (30s), writes <code>hung</code> in the ledger, and is free for the next job.</td>
+    <td>README §Breaking things; <code>instrument.go:192-199</code></td><td><span class="tag inferred">inferred</span></td></tr>
+  <tr><td>Once the ledger says <code>hung</code>, nothing more will ever be learned about that
+    execution. No later event can say whether it physically finished.</td>
+    <td><code>instrument.go</code>: no path writes a later outcome</td><td><span class="tag inferred">inferred</span></td></tr>
+  <tr><td>Our driver already reports the hang as <code>finished(hung)</code>, read from the ledger.</td>
+    <td><code>TestHungJobIsReportedFromTheLedger</code></td><td><span class="tag measured">measured</span></td></tr>
+  <tr><td>A failure carries <code>Retryable</code>, the instrument's own view. It is
+    <code>false</code> for the liquid handler and <code>true</code> for the incubator and plate reader.</td>
+    <td><code>docker-compose.yml</code> <code>FAILURES_RETRYABLE</code></td><td><span class="tag inferred">inferred</span></td></tr>
+  <tr><td><code>Retryable</code> is only in what <code>Run</code> returns, not in the ledger. To use it, the
+    driver must send it along in <code>finished</code>.</td>
+    <td><code>instrument.go</code> <code>Outcome</code> vs <code>Execution</code></td><td><span class="tag inferred">inferred</span></td></tr>
+  <tr><td>Acceptance check 5 fails whenever any step ran twice. A retry always fails it, but
+    only when faults are on. With faults off nothing retries.</td>
+    <td><code>scripts/acceptance.sh:128-137</code></td><td><span class="tag inferred">inferred</span></td></tr>
+</table>
+
+<h2 id="rolls">4. The measurement: faults are the same in every run</h2>
+<p>The instrument decides whether a job fails or hangs by hashing four things:</p>
+<p><code>roll = sha256(seed : device : step : attempt) % 100</code></p>
+<p>The <strong>run id is not in it</strong>. And <code>attempt</code> is how many times this run
+already executed this step on the instrument. So, under one seed, <strong>the first try of a
+given step has the same fate in every run</strong>. Only a later attempt rolls a new number.</p>
+<p>We copied the instrument's <code>roll</code> function and computed it for the real workflow
+steps, seed 0. A cell is <span class="bad">HANG</span> when the roll is below 30, which is what
+<code>*_HANG_PCT=30</code> does. <span class="tag measured">measured</span></p>
+
+<div class="scroll">
+<table>
+  <tr><th>Step</th><th>Device</th><th>1st try</th><th>2nd</th><th>3rd</th><th>4th</th></tr>
+  <tr><td>fill_sample_plate</td><td>liquid-handler-1</td><td class="hang">13 HANG</td><td class="hang">19 HANG</td><td class="fine">52</td><td class="fine">32</td></tr>
+  <tr><td>incubate_samples</td><td>incubator-1</td><td class="fine">43</td><td class="fine">43</td><td class="hang">15 HANG</td><td class="fine">94</td></tr>
+  <tr><td>fill_reagent_plate</td><td>liquid-handler-1</td><td class="hang">22 HANG</td><td class="fine">65</td><td class="hang">20 HANG</td><td class="fine">97</td></tr>
+  <tr><td>fill_buffer_plate</td><td>liquid-handler-1</td><td class="fine">59</td><td class="fine">78</td><td class="fine">66</td><td class="fine">48</td></tr>
+  <tr><td>warm_reagent_plate</td><td>incubator-1</td><td class="fine">30</td><td class="fine">68</td><td class="fine">79</td><td class="fine">98</td></tr>
+  <tr><td>combine</td><td>liquid-handler-1</td><td class="fine">61</td><td class="fine">53</td><td class="fine">63</td><td class="hang">19 HANG</td></tr>
+  <tr><td>read_plate</td><td>plate-reader-1</td><td class="fine">91</td><td class="fine">95</td><td class="fine">57</td><td class="fine">78</td></tr>
+  <tr><td>incubate (Triple Assay)</td><td>incubator-1</td><td class="hang">26 HANG</td><td class="hang">7 HANG</td><td class="fine">93</td><td class="fine">55</td></tr>
+</table>
+</div>
+
+<div class="callout warnc">
+<strong>What this means.</strong> With <code>LH_HANG_PCT=30</code> and seed 0,
+<code>fill_sample_plate</code> hangs on <em>every</em> PCR run. Without retries, that workflow
+can never complete under that setting, not once. With retries it gets through on the 3rd try.
+And the liquid handler is exactly the device we said is not safe to repeat. Liveness and safety
+pull in opposite directions there.
+</div>
+
+<h2 id="options">5. The three options</h2>
+
+<div class="card">
+<h3>A. No automatic retry: an operator decides</h3>
+<p>Hung and lost steps stay unresolved (API <code>running</code>). Failed stays failed.
+We add GraphQL mutations <code>retryStep</code> (start a new attempt) and <code>abandonStep</code>
+(mark it failed with "abandoned by operator").</p>
+<p><span class="ok">Easy:</span> never repeats anything physical by itself; smallest code.<br>
+<span class="bad">Hard:</span> under any fault seed, runs never end on their own (see the table).
+Needs a person watching.<br>
+<strong>Rests on:</strong> "repeating a lab operation is unsafe in general". True for liquid
+handling, false for a plate read.</p>
+</div>
+
+<div class="card">
+<h3>B. Automatic, bounded, per device <span class="tag measured" style="background:var(--accbg);color:var(--accent)">recommended</span></h3>
+<p>Each device declares <code>repeat_safe</code> in config. Proposed: plate reader yes, incubator
+yes, liquid handler no. Then the executor starts a new attempt when:</p>
+<ul>
+  <li><strong>failed</strong> and the instrument said <code>Retryable</code>;</li>
+  <li><strong>hung</strong> on a repeat-safe device, only after <code>finished(hung)</code>
+  arrives. The instrument is free by then, so there is no timer and no clock to trust;</li>
+  <li><strong>data lost</strong> on the plate reader: re-read the plate.</li>
+</ul>
+<p>At most 3 attempts in total. When attempts run out, or the device is not repeat-safe, the
+step is <code>failed</code> with the full reason. Every attempt stays in the record.</p>
+<p><span class="ok">Easy:</span> runs end on their own; safe devices recover; the record
+shows every try.<br>
+<span class="bad">Hard:</span> attempt history in the lifecycle (a schema change); events for old
+attempts must still find their step; check 5 fails under faults.<br>
+<strong>Rests on:</strong> repeat-safety can be stated honestly per device. True of this simulator's
+config, a <span class="tag guess">guess</span> about real equipment.</p>
+</div>
+
+<div class="card">
+<h3>C. Retry only on the instrument's own Retryable flag</h3>
+<p>No device config. Retry a failure when <code>Retryable</code> is true.</p>
+<p><span class="bad">The gap:</span> a hang returns no <code>Outcome</code>, so there is no flag.
+C must either never retry hangs (then it is A for hangs) or always retry them (then it double-
+dispenses on the liquid handler). It does not answer the question for the hardest case.</p>
+</div>
+
+<h2 id="scenarios">6. Every scenario under every option</h2>
+<div class="scroll">
+<table>
+  <tr><th>What happened</th><th>A: operator</th><th>B: per device</th><th>C: flag only</th><th>Today</th></tr>
+  <tr><td>Incubator hangs</td><td>running until someone acts</td><td class="">new attempt after the hang ends</td><td>running forever, or retried</td><td>running forever</td></tr>
+  <tr><td>Liquid handler hangs</td><td>running until someone acts</td><td><strong>failed</strong>: "hung; outcome unknown; not repeated"</td><td>running forever, or double dispense</td><td>running forever</td></tr>
+  <tr><td>Incubator fails (Retryable)</td><td>failed</td><td>new attempt</td><td>new attempt</td><td>failed</td></tr>
+  <tr><td>Liquid handler fails (not Retryable)</td><td>failed</td><td>failed</td><td>failed</td><td>failed</td></tr>
+  <tr><td>Plate read data lost</td><td>running until someone acts</td><td>re-read (attempt 2)</td><td>running forever</td><td>running forever</td></tr>
+  <tr><td>3rd attempt hangs too</td><td>n/a</td><td><strong>failed</strong> with all 3 attempts listed</td><td>n/a</td><td>n/a</td></tr>
+  <tr><td>Run cancelled while a retry is due</td><td>no retry</td><td>no retry: a cancel wins against the new attempt's claim, as today</td><td>same as B</td><td>n/a</td></tr>
+  <tr><td>Old attempt's late upload lands</td><td>recorded</td><td>recorded on attempt 1; attempt 2 is the one that counts</td><td>recorded</td><td>completes the read</td></tr>
+</table>
+</div>
+
+<h2 id="walk">7. Walk-through: a hung incubation under option B</h2>
+
+<svg viewBox="0 0 820 250" role="img" aria-label="Timeline: attempt 1 hangs for 30 seconds, then attempt 2 runs and completes">
+  <line x1="20" y1="200" x2="800" y2="200" stroke="var(--line)" stroke-width="2"/>
+  <text x="20" y="225" class="muted">0s</text>
+  <text x="330" y="225" class="muted">30s</text>
+  <text x="700" y="225" class="muted">~35s</text>
+
+  <text x="20" y="30">incubator ledger</text>
+  <rect x="40" y="42" width="300" height="34" rx="6" fill="var(--badbg)" stroke="var(--bad)"/>
+  <text x="52" y="64">attempt 1: hung (instrument frozen)</text>
+  <rect x="380" y="42" width="160" height="34" rx="6" fill="var(--okbg)" stroke="var(--ok)"/>
+  <text x="392" y="64">attempt 2: completed</text>
+
+  <text x="20" y="110">record (API)</text>
+  <rect x="40" y="122" width="300" height="34" rx="6" fill="var(--accbg)" stroke="var(--accent)"/>
+  <text x="52" y="144">running</text>
+  <rect x="340" y="122" width="40" height="34" fill="var(--accbg)" stroke="var(--accent)"/>
+  <rect x="380" y="122" width="160" height="34" rx="6" fill="var(--accbg)" stroke="var(--accent)"/>
+  <text x="392" y="144">running (attempt 2)</text>
+  <rect x="540" y="122" width="200" height="34" rx="6" fill="var(--okbg)" stroke="var(--ok)"/>
+  <text x="552" y="144">completed</text>
+
+  <line x1="340" y1="36" x2="340" y2="200" stroke="var(--bad)" stroke-dasharray="4 4"/>
+  <text x="300" y="190" class="muted">finished(hung)</text>
+  <line x1="380" y1="36" x2="380" y2="200" stroke="var(--accent)" stroke-dasharray="4 4"/>
+  <text x="388" y="190" class="muted">dispatch attempt 2</text>
+</svg>
+
+<ol class="steps">
+  <li>The executor sends <code>run-x/incubate_samples/1</code>. The driver claims it and starts the instrument.</li>
+  <li>The instrument hangs. The ledger says <code>running</code>. The record says <code>running</code>, which is true.</li>
+  <li>After 30s the instrument frees itself and writes <code>hung</code>. The driver publishes <code>finished(hung)</code>.</li>
+  <li>The executor applies it. Attempt 1 is now final: "hung, outcome unknown". The incubator is repeat-safe and this was attempt 1 of 3, so a <code>Retry</code> fact opens attempt 2.</li>
+  <li>The dispatch loop sends <code>run-x/incubate_samples/2</code>, a new job id, so the driver accepts it. Claim, run, report, as usual.</li>
+  <li>Attempt 2 completes. The step is <code>completed</code>, and the run moves on.</li>
+</ol>
+<p>The same steps on the <strong>liquid handler</strong> stop at step 4. It is not repeat-safe,
+so the step becomes <code>failed</code> with "instrument hung; outcome unknown; not repeated:
+liquid handling is not safe to repeat", and the run ends <code>failed</code>.</p>
+<p>There is <strong>no timer anywhere</strong>. The retry is triggered by the instrument's own
+report that it gave up. That also avoids sending attempt 2 while the instrument is still
+frozen, which today would get <code>busy</code> or, worse, a granted claim and <code>ErrBusy</code> (K19).</p>
+
+<h2 id="history">8. What the record looks like with attempts</h2>
+<p>Today a step holds one attempt (concern K2). Under B a step holds a list. The step's status
+comes from its <strong>latest</strong> attempt. Older attempts are kept as history and still
+accept late facts.</p>
+<div class="card">
+<pre style="margin:0;white-space:pre-wrap"><code>incubate_samples                   status: completed   (from attempt 2)
+  attempt 1  run-x/incubate_samples/1   hung       09:00:02 – 09:00:32   outcome unknown
+  attempt 2  run-x/incubate_samples/2   completed  09:00:33 – 09:00:35</code></pre>
+</div>
+<ul>
+  <li><strong>REST</strong> (fixed shape): shows the latest attempt only: its status, times and error.
+  The API can't change, so history isn't visible there.</li>
+  <li><strong>GraphQL</strong>: exposes <code>attempts</code>, so a scientist can see that the
+  incubator hung once before it worked.</li>
+  <li><strong>Finding a step from an old job id:</strong> today we look up <code>steps.job_id</code>,
+  which only holds the current attempt. A late event for attempt 1 would be dropped as
+  "unknown job". Instead we parse the job id (<code>run/step/attempt</code>) to find the step,
+  then the attempt inside it.</li>
+  <li><strong>Ledger vs record:</strong> the ledger has two executions; the record has two
+  attempts. They agree. Acceptance check 5 still says "ran more than once", because it counts
+  executions per step name. That is the honest result under faults (K5), and NOTES.md explains it.</li>
+</ul>
+
+<h2 id="status">9. The open question: what status does a final hang get?</h2>
+<p>When a hung attempt will not be repeated (unsafe device, or attempts used up), the step needs
+a status. The API only has <code>pending / running / completed / failed / cancelled</code>.</p>
+
+<div class="grid">
+  <div class="card">
+    <strong>failed, with "outcome unknown"</strong> (recommended)
+    <p>CLAUDE.md: "<code>running</code> while we can still find out, and <code>failed</code> with
+    the reason once we can't." After the ledger says <code>hung</code> we can't find out any
+    more. <code>failed</code> means "this step did not achieve its result". It does not claim the
+    instrument did nothing. The error says the physical outcome is unknown.</p>
+    <p>The run can end, as failed.</p>
+  </div>
+  <div class="card">
+    <strong>running until an operator acts</strong>
+    <p>Keeps your S1 point, "a hung job doesn't necessarily mean failed", literally. But
+    <code>running</code> claims something is still happening, and the instrument has stopped
+    and moved on. Arguably that is the less true of the two.</p>
+    <p>The run stays open until someone decides.</p>
+  </div>
+</div>
+
+<div class="callout">
+<strong>How this differs from data lost (D3).</strong> After a hang, the ledger's word is final:
+no later evidence can come. After a data loss, a late upload <em>can</em> still land. So a
+final hang may be <code>failed</code>, but a lost read with no retry left stays unresolved.
+Under B that only happens if all 3 re-reads lose their data.
+</div>
+
+<h2 id="cost">10. What it costs to build (option B)</h2>
+<table>
+  <tr><th>Slice</th><th>What</th><th>Size</th></tr>
+  <tr><td>Protocol</td><td>Add optional <code>retryable</code> to <code>finished</code> (additive, still v1)</td><td>small</td></tr>
+  <tr><td>Lifecycle</td><td>Attempts list; a <code>Retry</code> fact; status from the latest attempt; a hung attempt is final; JSON version (K10)</td><td>the main one</td></tr>
+  <tr><td>Store</td><td>Find a step by parsing the job id, so old attempts still accept facts</td><td>small</td></tr>
+  <tr><td>Policy</td><td>Per-device <code>repeat_safe</code> and max attempts in config; the executor applies <code>Retry</code> after a final attempt</td><td>small</td></tr>
+  <tr><td>Chaos</td><td><code>/break</code> with <code>INC_HANG_PCT=30</code> and <code>LH_HANG_PCT=30</code>: predict from the table above, compare</td><td>an experiment</td></tr>
+</table>
+
+<h2 id="decide">11. What you are deciding</h2>
+<ol>
+  <li><strong>Policy:</strong> A (operator), B (automatic, per device), or C (instrument's flag).</li>
+  <li><strong>Final hang status:</strong> <code>failed</code> + "outcome unknown", or
+  <code>running</code> until an operator acts.</li>
+  <li>If B: <strong>which devices are repeat-safe</strong> (proposed: plate reader, incubator) and
+  <strong>how many attempts</strong> (proposed: 3).</li>
+</ol>
+<p><strong>What would change the recommendation:</strong> if repeat-safety can't be stated
+honestly per device, choose A. If acceptance check 5 must hold even with faults on, choose A.</p>
+
+</main>
+</body>
+</html>

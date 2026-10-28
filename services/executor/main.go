@@ -51,7 +51,9 @@ func main() {
 		log.Fatalf("ping database: %v", err)
 	}
 
-	nc, err := nats.Connect(natsURL, nats.MaxReconnects(-1), nats.ReconnectWait(time.Second))
+	nc, err := nats.Connect(natsURL, nats.MaxReconnects(-1), nats.ReconnectWait(time.Second),
+		// The default (2 min x 2) let a 20s partition go unnoticed (chaos-log C1).
+		nats.PingInterval(5*time.Second), nats.MaxPingsOutstanding(2))
 	if err != nil {
 		log.Fatalf("connect nats %s: %v", natsURL, err)
 	}
@@ -69,15 +71,22 @@ func main() {
 	defer stop()
 
 	executor := NewExecutor(db, nc, st)
+	if executor.policy, err = PolicyFromEnv(os.LookupEnv); err != nil {
+		log.Fatalf("retry policy: %v", err)
+	}
+	log.Printf("executor: retry policy %+v", executor.policy)
 	if err := executor.Start(ctx); err != nil {
 		log.Fatalf("executor start: %v", err)
 	}
 	defer executor.Close()
 
 	api := &API{executor: executor, workflowsPath: workflowsPath}
+	mux := http.NewServeMux()
+	mux.Handle("/", api.Routes())
+	mux.Handle("/graphql", newGraphQL(executor, workflowsPath))
 	srv := &http.Server{
 		Addr:              ":5001",
-		Handler:           api.Routes(),
+		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		IdleTimeout:       60 * time.Second,

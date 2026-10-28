@@ -1,0 +1,1075 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lab Automation Overview</title>
+<style>
+:root{
+  --bg:#fafaf8; --fg:#1c1d1f; --muted:#5d6168; --card:#ffffff; --line:#d9dadd; --note:#eef0f3;
+  --accent:#2457c5; --accent-bg:#e8eefb;
+  --good:#1b7a45; --good-bg:#e3f3ea;
+  --warn:#9a6200; --warn-bg:#fbf0d9;
+  --bad:#b3341f; --bad-bg:#fbe6e1;
+  --c-cmd:#2457c5; --c-claim:#7b3fc4; --c-evt:#1b7a45; --c-data:#b8651b; --c-state:#6b7079;
+  --focus:#e0a800;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#131416; --fg:#e8e9eb; --muted:#9a9ea6; --card:#1c1e21; --line:#33363b; --note:#25282c;
+    --accent:#8fb0ff; --accent-bg:#1b2538;
+    --good:#6fd39b; --good-bg:#17301f;
+    --warn:#e8b95a; --warn-bg:#33290f;
+    --bad:#f08a76; --bad-bg:#3a1b15;
+    --c-cmd:#8fb0ff; --c-claim:#c4a2ff; --c-evt:#6fd39b; --c-data:#f0a860; --c-state:#9a9ea6;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#131416; --fg:#e8e9eb; --muted:#9a9ea6; --card:#1c1e21; --line:#33363b; --note:#25282c;
+  --accent:#8fb0ff; --accent-bg:#1b2538;
+  --good:#6fd39b; --good-bg:#17301f;
+  --warn:#e8b95a; --warn-bg:#33290f;
+  --bad:#f08a76; --bad-bg:#3a1b15;
+  --c-cmd:#8fb0ff; --c-claim:#c4a2ff; --c-evt:#6fd39b; --c-data:#f0a860; --c-state:#9a9ea6;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html{background:var(--bg)}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:1140px;margin:0 auto;padding:28px 16px 72px}
+h1{font-size:1.9rem;line-height:1.2;margin:0 0 6px}
+h2{font-size:1.4rem;margin:0 0 4px}
+h3{font-size:1.1rem;margin:0 0 6px}
+h4{margin:14px 0 4px;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+p{margin:8px 0}
+ul{margin:6px 0;padding-left:20px}
+li{margin:4px 0}
+a{color:var(--accent)}
+code{font:.86em ui-monospace,Menlo,Consolas,monospace;background:var(--note);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+.sub{color:var(--muted);margin:0}
+section{margin-top:52px;padding-top:20px;border-top:1px solid var(--line)}
+.lede{font-size:1.05rem;max-width:760px}
+.rule{background:var(--accent-bg);border-left:4px solid var(--accent);padding:12px 16px;border-radius:6px;margin:16px 0;max-width:760px}
+.rule b{display:block}
+.toc{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 0;padding:0;list-style:none}
+.toc a{display:inline-block;padding:6px 12px;border:1px solid var(--line);border-radius:99px;background:var(--card);text-decoration:none;color:var(--fg);font-size:.92rem}
+.toc a:hover{border-color:var(--accent)}
+.toc span{color:var(--muted);font-size:.8rem;margin-left:4px}
+
+/* two-column stage: diagram + panel */
+.stage{display:grid;grid-template-columns:minmax(0,1.75fr) minmax(0,1fr);gap:16px;margin-top:16px;align-items:start}
+.stepped{grid-template-rows:auto auto 1fr;row-gap:0}
+.stepped .dwrap{grid-column:1;grid-row:1 / span 3}
+.stepped > .panel,.stepped > .controls,.stepped > .summary{grid-column:2}
+.stepped > .summary{align-self:start}
+@media (max-width:880px){
+  .stage{grid-template-columns:minmax(0,1fr)}
+  .stepped{display:block}
+  .stepped > .panel{margin-top:12px}
+  .stepped > .controls{position:sticky;bottom:0;z-index:3;background:var(--bg);border-top:1px solid var(--line);padding:10px 0;margin-top:10px}
+}
+.diagram{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px}
+.diagram svg{display:block;width:100%;height:auto}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;min-height:200px}
+.panel h3{margin-top:2px}
+.kicker{font-size:.8rem;color:var(--muted);margin-bottom:4px}
+.panel ul{padding-left:18px}
+.panel .hint{color:var(--muted)}
+
+/* legend */
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin:8px 4px 2px;padding:0;list-style:none;font-size:.85rem}
+.legend li{margin:0}
+.legend button,.legend span.item{display:flex;align-items:center;gap:7px;background:none;border:1px solid transparent;border-radius:6px;padding:3px 6px;font:inherit;color:var(--fg);cursor:pointer}
+.legend span.item{cursor:default}
+.legend button:hover{border-color:var(--line)}
+.legend button[aria-pressed="true"]{border-color:var(--fg);background:var(--note)}
+.legend svg{width:34px;height:12px;flex:none}
+
+/* svg */
+.comp{cursor:pointer;outline:none}
+.comp .box{fill:var(--card);stroke:var(--fg);stroke-width:1.4;transition:opacity .2s}
+.comp.store .box{fill:var(--note)}
+.comp .t{font-weight:700;font-size:17px;fill:var(--fg)}
+.comp .s{font-size:13.5px;fill:var(--muted)}
+.comp:hover .box{stroke:var(--accent);stroke-width:2}
+.comp:focus-visible .box{stroke:var(--focus);stroke-width:3.5}
+.comp.active .box{stroke:var(--accent);stroke-width:3;fill:var(--accent-bg)}
+.comp.sel .box{stroke:var(--accent);stroke-width:3.2}
+.comp.dim{opacity:.45}
+.comp .down{display:none}
+.comp.isdown .box{stroke:var(--bad);stroke-dasharray:6 4;fill:url(#hatch)}
+.comp.isdown .down{display:inline}
+.comp.isdown{opacity:1}
+.down{font-size:11px;font-weight:800;fill:var(--bad);letter-spacing:.06em}
+.deckshadow{fill:var(--card);stroke:var(--line);stroke-width:1.2}
+.flow{fill:none;transition:opacity .2s}
+.f-cmd{stroke:var(--c-cmd);stroke-width:2.6}
+.f-claim{stroke:var(--c-claim);stroke-width:2.8;stroke-dasharray:1 6;stroke-linecap:round}
+.f-evt{stroke:var(--c-evt);stroke-width:5.5}
+.f-data{stroke:var(--c-data);stroke-width:2.6;stroke-dasharray:9 5}
+.f-state{stroke:var(--c-state);stroke-width:2}
+.flow.dim{opacity:.13}
+.flow.on{filter:drop-shadow(0 0 3px var(--bg))}
+.mk-cmd{fill:var(--c-cmd)} .mk-claim{fill:var(--c-claim)} .mk-evt{fill:var(--c-evt)} .mk-data{fill:var(--c-data)} .mk-state{fill:var(--c-state)}
+.pill rect{fill:var(--card);stroke-width:1.6}
+.pill text{font-size:13px;font-weight:600;fill:var(--fg)}
+.hatch-line{stroke:var(--bad-bg);stroke-width:6}
+
+/* stepper */
+.controls{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:10px 0 0}
+.btn{font:inherit;font-size:.95rem;padding:7px 14px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+.btn:hover:not(:disabled){border-color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--bg);font-weight:600}
+.btn:disabled{opacity:.4;cursor:default}
+.btn:focus-visible,.dot:focus-visible,.legend button:focus-visible,.tab:focus-visible,summary:focus-visible,.toc a:focus-visible,.seeit:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.dots{display:flex;flex-wrap:wrap;gap:4px;margin-left:auto}
+.dot{width:28px;height:28px;border-radius:50%;border:1px solid var(--line);background:var(--card);color:var(--muted);font:600 .75rem system-ui,sans-serif;cursor:pointer;padding:0}
+.dot[aria-current="step"]{background:var(--accent);border-color:var(--accent);color:var(--bg)}
+.dot.seen{color:var(--fg);border-color:var(--muted)}
+.count{font-size:.85rem;color:var(--muted)}
+
+/* panel content */
+.badge{display:inline-block;font-size:.78rem;font-weight:700;padding:2px 10px;border-radius:99px;margin:2px 0 6px;border:1px solid}
+.b-known{background:var(--good-bg);color:var(--good);border-color:var(--good)}
+.b-unknown{background:var(--warn-bg);color:var(--warn);border-color:var(--warn)}
+.b-intent{background:var(--accent-bg);color:var(--accent);border-color:var(--accent)}
+.b-bad{background:var(--bad-bg);color:var(--bad);border-color:var(--bad)}
+.kv{width:100%;border-collapse:collapse;font-size:.86rem;margin:2px 0}
+.kv td{padding:3px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+.kv tr:last-child td{border-bottom:0}
+.kv td:first-child{color:var(--muted);white-space:nowrap;width:1%;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.82rem}
+.kv td:last-child{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.82rem;overflow-wrap:anywhere}
+.kv tr.chg td{background:var(--warn-bg)}
+.kv tr.chg td:first-child::before{content:"● ";color:var(--warn)}
+.kv .nil{color:var(--muted)}
+.why{background:var(--note);border-radius:8px;padding:8px 12px;margin-top:12px;font-size:.92rem}
+.src{font-size:.8rem;color:var(--muted);margin-top:10px}
+
+/* tabs */
+.tabs{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 0}
+.tab{font:inherit;font-size:.92rem;padding:8px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer;text-align:left}
+.tab[aria-pressed="true"]{border-color:var(--accent);background:var(--accent-bg);font-weight:600}
+.variant{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:10px 0 0;font-size:.9rem}
+.summary{margin-top:14px;border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--card)}
+.summary dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;margin:6px 0 0;font-size:.92rem}
+.summary dt{color:var(--muted)}
+.summary dd{margin:0}
+
+/* state table */
+.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--card);margin-top:14px}
+table.state{border-collapse:collapse;width:100%;font-size:.9rem;min-width:560px}
+table.state th,table.state td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+table.state th{background:var(--note);font-size:.78rem}
+table.state tr:last-child td{border-bottom:0}
+.yes{color:var(--good);font-weight:700}
+.no{color:var(--bad);font-weight:700}
+
+/* decisions */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;margin-top:16px}
+details.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:0}
+details.card summary{cursor:pointer;padding:12px 14px;list-style:none;display:flex;gap:10px;align-items:flex-start}
+details.card summary::-webkit-details-marker{display:none}
+details.card summary::before{content:"+";font-weight:700;color:var(--accent);width:14px;flex:none}
+details.card[open] summary::before{content:"–"}
+details.card summary b{display:block}
+details.card summary span{color:var(--muted);font-size:.9rem}
+details.card .body{padding:0 14px 12px 38px;font-size:.93rem}
+.seeit{font:inherit;font-size:.88rem;background:none;border:0;color:var(--accent);cursor:pointer;padding:0;text-decoration:underline}
+.limits{background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:6px;padding:12px 16px;margin-top:16px}
+.limits ul{margin:4px 0}
+.tag{display:inline-block;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:0 7px;border-radius:99px;margin-left:4px;vertical-align:1px}
+.t-meas{background:var(--good-bg);color:var(--good)}
+.t-inf{background:var(--accent-bg);color:var(--accent)}
+.t-guess{background:var(--warn-bg);color:var(--warn)}
+footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:.9rem}
+@media (max-width:560px){
+  h1{font-size:1.5rem}
+  .dots{display:none}
+  .panel{padding:14px}
+}
+@media (prefers-reduced-motion: reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="m-cmd" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk-cmd"/></marker>
+    <marker id="m-claim" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk-claim"/></marker>
+    <marker id="m-evt" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="15" markerHeight="15" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk-evt"/></marker>
+    <marker id="m-data" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk-data"/></marker>
+    <marker id="m-state" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk-state"/></marker>
+    <pattern id="hatch" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="10" height="10" fill="var(--card)"/><line x1="0" y1="0" x2="0" y2="10" class="hatch-line"/></pattern>
+  </defs>
+</svg>
+
+<main>
+<header>
+  <p class="sub">Lab automation challenge · visual companion to <a href="../../NOTES.md">NOTES.md</a></p>
+  <h1>How a lab run stays true</h1>
+  <p class="lede">An executor runs workflows on three simulated instruments: a liquid handler, an
+  incubator and a plate reader. Messages can be lost, late or repeated, and any process can crash.
+  The goal is a run record that never claims something the evidence doesn't support.</p>
+  <div class="rule"><b>One rule shaped the design</b>Durable facts, short-lived intentions, and Postgres decides.
+  Commands may be lost and are simply sent again. Facts about what happened are stored until the
+  executor has saved them. Every decision is one database transaction.</div>
+  <ul class="toc" aria-label="Sections">
+    <li><a href="#explore">1 · Explore the architecture <span>1 min</span></a></li>
+    <li><a href="#follow">2 · Follow a run <span>2 min</span></a></li>
+    <li><a href="#failures">3 · When things go wrong <span>2 min</span></a></li>
+    <li><a href="#decisions">4 · Key decisions</a></li>
+  </ul>
+</header>
+
+<section id="explore" aria-labelledby="h-explore">
+  <h2 id="h-explore">1 · Explore the architecture</h2>
+  <p class="sub">Click a box to see what it owns and why it's there. Click a line type in the legend to see what travels on it.</p>
+  <div class="stage">
+    <div>
+      <div class="diagram" id="dia-explore"></div>
+      <ul class="legend" id="legend-explore" aria-label="Message types"></ul>
+    </div>
+    <div class="panel" id="panel-explore" aria-live="polite"></div>
+  </div>
+  <h3 style="margin-top:22px">Where each piece of state lives</h3>
+  <div class="tablewrap">
+  <table class="state">
+    <thead><tr><th>State</th><th>Lives in</th><th>Survives a restart?</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td>Runs, steps, every attempt, every fact received</td><td>Postgres (<code>steps.lifecycle</code>)</td><td class="yes">Yes</td><td>Source of truth for <b>intent</b>, and the queue of what to run next</td></tr>
+      <tr><td>What physically happened, with times</td><td>Each instrument's ledger, on disk</td><td class="yes">Yes</td><td>Source of truth for <b>physical facts</b></td></tr>
+      <tr><td>Facts on their way to the executor</td><td>JetStream stream <code>LAB_EVENTS</code></td><td class="yes">Yes</td><td>Lets the executor be down without losing facts</td></tr>
+      <tr><td>Plate data</td><td>S3, at <code>runs/&lt;job id&gt;.csv</code></td><td class="yes">Yes</td><td>Evidence for a read, checked by hash</td></tr>
+      <tr><td>A read's bytes before they're uploaded</td><td>Driver memory</td><td class="no">No</td><td>The one place data can be lost; see "lost read" below</td></tr>
+      <tr><td>Commands and claims</td><td>Core NATS (in flight only)</td><td class="no">No</td><td>Sent again until there is evidence</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section id="follow" aria-labelledby="h-follow">
+  <h2 id="h-follow">2 · Follow a run</h2>
+  <p class="sub">One plate read, <code>read_plate</code> on <code>plate-reader-1</code>, from dispatch to completion. Use Next and Back, or the ← → keys.
+  At each step, compare what the API says with the evidence behind it.</p>
+  <div class="stage stepped">
+    <div class="dwrap">
+      <div class="diagram" id="dia-follow"></div>
+      <ul class="legend" id="legend-follow" aria-label="Message types"></ul>
+    </div>
+    <div class="panel" id="panel-follow" aria-live="polite"></div>
+    <div class="controls" id="ctl-follow"></div>
+  </div>
+</section>
+
+<section id="failures" aria-labelledby="h-failures">
+  <h2 id="h-failures">3 · What happens when things go wrong</h2>
+  <p class="sub">Pick a scenario and step through it. Hatched red boxes are down. The badge says whether the record is
+  backed by evidence (<span class="badge b-known">Known</span>), is still an open question (<span class="badge b-unknown">Unknown</span>),
+  or is only our own plan (<span class="badge b-intent">Intent</span>).</p>
+  <div class="tabs" id="tabs" role="group" aria-label="Scenarios"></div>
+  <div class="variant" id="variant" hidden></div>
+  <div class="stage stepped">
+    <div class="dwrap">
+      <div class="diagram" id="dia-fail"></div>
+      <ul class="legend" id="legend-fail" aria-label="Message types"></ul>
+    </div>
+    <div class="panel" id="panel-fail" aria-live="polite"></div>
+    <div class="controls" id="ctl-fail"></div>
+    <div class="summary" id="summary-fail"></div>
+  </div>
+</section>
+
+<section id="decisions" aria-labelledby="h-decisions">
+  <h2 id="h-decisions">4 · The decisions that make it work</h2>
+  <p class="sub">Open a card for the reasoning. "See it" jumps to the scenario that shows it.</p>
+  <div class="cards" id="cards"></div>
+  <div class="limits">
+    <h3>What this design does not promise</h3>
+    <ul>
+      <li><b>Not exactly-once delivery.</b> Messages can arrive twice, late, or not at all. Stable job ids,
+        JetStream's duplicate window (2 min) and idempotent apply make repeats harmless.
+        A job runs at most once on its instrument, assuming one driver per instrument and a ledger that survives restarts (K55).</li>
+      <li><b>Not guaranteed to finish.</b> A driver that never comes back (K6), or a lost read whose re-reads also fail (K39),
+        leaves its run <code>running</code> for ever. That is true, but stuck: the operator action to end it was not built.</li>
+      <li><b>Not instant.</b> After the executor is cut off from NATS, the record can lag by up to the 30s ack wait (K62). A storage outage costs at least SeaweedFS's restart, about 16s. <span class="tag t-meas">measured</span></li>
+      <li><b>Assumptions.</b> One executor, one NATS server, one driver per instrument (K55, K56). Which operations are safe to repeat on real equipment is a guess, so it is a setting per device, not code. <span class="tag t-guess">guess</span></li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <p>Sources: <a href="../../NOTES.md">NOTES.md</a> (the main submission document),
+  <a href="../forengineer/decisions.md">decisions</a>, <a href="../forengineer/chaos-log.md">chaos experiments</a>,
+  <a href="../forengineer/concerns.md">concerns</a>, and the code in <code>services/</code>.
+  For deeper dives: <a href="d1-messaging-v2.html">D1 messaging explainer</a> · <a href="d4-hang-retry-v2.html">D4 retry explainer</a>.</p>
+  <p>Checked against the code on 2026-10-27. Ids and times in the walkthroughs are examples. Tags:
+  <span class="tag t-meas">measured</span> we ran it · <span class="tag t-inf">inferred</span> from reading the code ·
+  <span class="tag t-guess">guess</span>.</p>
+</footer>
+</main>
+
+<script>
+(function(){
+"use strict";
+
+/* ---------- message types ---------- */
+const TYPES = {
+  cmd:   {name:"Command", sample:"cmd", text:"Core NATS request, executor → driver. Not stored. Sent again with the same job id until there is evidence."},
+  claim: {name:"Claim", sample:"claim", text:"Core NATS request, driver → executor, just before the job starts. Answered go or abort."},
+  evt:   {name:"Durable event", sample:"evt", text:"JetStream, driver → executor: started, finished, stored, data_lost. Kept until the executor has saved it."},
+  data:  {name:"Data upload / read-back", sample:"data", text:"The driver PUTs a read's bytes to S3; the executor reads them back and hashes them."},
+  state: {name:"State write", sample:"state", text:"A database transaction, or the instrument writing its ledger."}
+};
+/* flow id -> type, and the components it links */
+const FLOWS = {
+  db:{type:"state"}, readback:{type:"data"}, cmd:{type:"cmd"}, claim:{type:"claim"},
+  evt:{type:"evt"}, upload:{type:"data"}, run:{type:"state"}, ledger:{type:"state"}
+};
+
+/* ---------- layouts ---------- */
+const LAYOUTS = {
+  wide: {
+    vb:[960,590],
+    box:{
+      postgres:{x:20,y:30,w:210,h:100,sub:["runs · steps · attempts","decides everything"]},
+      executor:{x:340,y:20,w:280,h:120,sub:["REST + GraphQL API","dispatch loop · claim handler","event consumer · storage check"]},
+      s3:{x:730,y:30,w:210,h:100,sub:["SeaweedFS","runs/<job id>.csv"]},
+      corenats:{x:210,y:250,w:240,h:84,sub:["request / reply","nothing is stored"]},
+      jetstream:{x:510,y:250,w:240,h:84,sub:["stream LAB_EVENTS","stored on disk"]},
+      driver:{x:150,y:430,w:620,h:130,sub:[]},
+      instrument:{x:420,y:464,w:150,h:80,sub:["simulated,","in process"]},
+      ledger:{x:600,y:464,w:150,h:80,sub:["file on disk","physical truth"]}
+    },
+    deckText:{x:166,y:460}, deckSub:{x:166,y:484},
+    paths:{
+      db:["M340 80 H230"],
+      readback:["M620 80 H730"],
+      cmd:["M390 140 V250","M260 334 V430"],
+      claim:["M330 430 V334","M430 250 V140"],
+      evt:["M560 430 V334","M580 250 V140"],
+      upload:["M770 500 H860 V130"],
+      run:["M384 504 H420"],
+      ledger:["M570 504 H600"]
+    },
+    both:{db:true},
+    pill:{db:[285,62],readback:[675,62],cmd:[390,178],claim:[430,214],evt:[580,196],upload:[860,300],run:[400,530],ledger:[585,530]}
+  },
+  tall: {
+    vb:[410,760],
+    box:{
+      postgres:{x:10,y:10,w:170,h:84,sub:["runs · steps","decides"]},
+      s3:{x:220,y:10,w:160,h:84,sub:["runs/<job id>.csv"]},
+      executor:{x:30,y:150,w:330,h:96,sub:["API · dispatch loop","claims · events · storage check"]},
+      corenats:{x:10,y:330,w:170,h:80,sub:["request / reply","not stored"]},
+      jetstream:{x:210,y:330,w:170,h:80,sub:["LAB_EVENTS","stored on disk"]},
+      driver:{x:20,y:500,w:330,h:220,sub:[]},
+      instrument:{x:36,y:600,w:140,h:80,sub:["simulated,","in process"]},
+      ledger:{x:196,y:600,w:140,h:80,sub:["file on disk"]}
+    },
+    deckText:{x:36,y:530}, deckSub:{x:36,y:554},
+    paths:{
+      db:["M95 150 V94"],
+      readback:["M305 150 V94"],
+      cmd:["M70 246 V330","M60 410 V500"],
+      claim:["M140 500 V410","M150 330 V246"],
+      evt:["M290 500 V410","M290 330 V246"],
+      upload:["M350 640 H396 V52 H382"],
+      run:["M106 566 V600"],
+      ledger:["M176 638 H196"]
+    },
+    both:{db:true},
+    pill:{db:[95,122],readback:[305,122],cmd:[70,288],claim:[150,300],evt:[290,288],upload:[396,460],run:[106,583],ledger:[186,690]}
+  }
+};
+
+const TITLES = {postgres:"Postgres", executor:"Executor", s3:"S3 storage", corenats:"Core NATS", jetstream:"JetStream", driver:"Driver", instrument:"Instrument", ledger:"Ledger"};
+const STORES = {postgres:1, s3:1, ledger:1, jetstream:1};
+const ORDER = ["postgres","executor","s3","corenats","jetstream","driver","instrument","ledger"];
+
+function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}
+
+/* ---------- diagram ---------- */
+function Diagram(host, opts){
+  this.host = host; this.opts = opts || {}; this.state = {}; this.layoutName = null;
+  const ro = new ResizeObserver(() => this.render());
+  ro.observe(host);
+  this.render();
+}
+Diagram.prototype.render = function(){
+  const name = this.host.clientWidth < 520 ? "tall" : "wide";
+  if (name === this.layoutName) return;
+  this.layoutName = name;
+  const L = LAYOUTS[name], [W,H] = L.vb;
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="group" aria-label="System topology">`;
+  // flows first so boxes sit on top of line ends
+  for (const id in L.paths){
+    const t = FLOWS[id].type;
+    L.paths[id].forEach(d => {
+      s += `<path class="flow f-${t}" data-flow="${id}" d="${d}" marker-end="url(#m-${t})"${L.both[id]?` marker-start="url(#m-${t})"`:""}/>`;
+    });
+  }
+  for (const id of ORDER){
+    const b = L.box[id];
+    const cls = "comp" + (STORES[id] ? " store" : "");
+    s += `<g class="${cls}" data-id="${id}" tabindex="0" role="button" aria-label="${TITLES[id]}: show details">`;
+    if (id === "driver"){
+      s += `<rect class="deckshadow" x="${b.x+16}" y="${b.y+16}" width="${b.w}" height="${b.h}" rx="12"/>`;
+      s += `<rect class="deckshadow" x="${b.x+8}" y="${b.y+8}" width="${b.w}" height="${b.h}" rx="12"/>`;
+      s += `<rect class="box" x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="12"/>`;
+      s += `<text class="t deck-t" x="${L.deckText.x}" y="${L.deckText.y}">Driver</text>`;
+      s += `<text class="s deck-s" x="${L.deckSub.x}" y="${L.deckSub.y}"></text>`;
+      s += `<text class="down" x="${b.x+b.w-14}" y="${b.y+24}" text-anchor="end">DOWN</text>`;
+    } else {
+      s += `<rect class="box" x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="10"/>`;
+      s += `<text class="t" x="${b.x+12}" y="${b.y+26}">${TITLES[id]}</text>`;
+      b.sub.forEach((line,i) => { s += `<text class="s" x="${b.x+12}" y="${b.y+48+i*18}">${esc(line)}</text>`; });
+      s += `<text class="down" x="${b.x+b.w-10}" y="${b.y+b.h-9}" text-anchor="end">DOWN</text>`;
+    }
+    s += `</g>`;
+  }
+  s += `<g class="pills"></g></svg>`;
+  this.host.innerHTML = s;
+  this.svg = this.host.querySelector("svg");
+  this.host.querySelectorAll(".comp").forEach(g => {
+    const id = g.dataset.id;
+    g.addEventListener("click", e => { e.stopPropagation(); this.opts.onPick && this.opts.onPick(id); });
+    g.addEventListener("keydown", e => {
+      if (e.key === "Enter" || e.key === " "){ e.preventDefault(); this.opts.onPick && this.opts.onPick(id); }
+    });
+    if (!this.opts.onPick){ g.removeAttribute("tabindex"); g.removeAttribute("role"); g.style.cursor = "default"; g.setAttribute("aria-hidden","true"); }
+  });
+  this.apply();
+};
+Diagram.prototype.set = function(state){ this.state = state || {}; this.apply(); };
+Diagram.prototype.apply = function(){
+  const st = this.state, L = LAYOUTS[this.layoutName];
+  const active = new Set(st.active || []), flows = new Set(st.flows || []), down = new Set(st.down || []);
+  const focusing = active.size > 0 || flows.size > 0;
+  this.host.querySelectorAll(".comp").forEach(g => {
+    const id = g.dataset.id;
+    g.classList.toggle("active", active.has(id) && !st.select);
+    g.classList.toggle("sel", st.select === id);
+    g.classList.toggle("isdown", down.has(id));
+    // the driver deck is never dimmed when something inside it is lit
+    const inside = id === "driver" && (active.has("instrument") || active.has("ledger") || down.has("instrument"));
+    g.classList.toggle("dim", focusing && !active.has(id) && !down.has(id) && !inside);
+  });
+  this.host.querySelectorAll(".flow").forEach(p => {
+    const on = flows.has(p.dataset.flow);
+    p.classList.toggle("on", focusing && on);
+    p.classList.toggle("dim", focusing && !on);
+  });
+  const deckT = this.host.querySelector(".deck-t"), deckS = this.host.querySelector(".deck-s");
+  deckT.textContent = st.deckTitle || (st.deck ? "Driver · " + st.deck : "Driver");
+  deckS.textContent = st.deckSub || (st.deck ? "Go process, one per instrument" : "one per instrument (×3)");
+  // pills
+  const g = this.host.querySelector(".pills");
+  g.innerHTML = "";
+  const labels = st.labels || {};
+  for (const id in labels){
+    const at = L.pill[id]; if (!at) continue;
+    const t = FLOWS[id].type;
+    const pill = document.createElementNS("http://www.w3.org/2000/svg","g");
+    pill.setAttribute("class","pill");
+    const rect = document.createElementNS("http://www.w3.org/2000/svg","rect");
+    const text = document.createElementNS("http://www.w3.org/2000/svg","text");
+    text.textContent = labels[id];
+    text.setAttribute("text-anchor","middle");
+    text.setAttribute("dominant-baseline","central");
+    pill.appendChild(rect); pill.appendChild(text); g.appendChild(pill);
+    const w = (text.getComputedTextLength ? text.getComputedTextLength() : labels[id].length*7) + 16;
+    const W = L.vb[0];
+    let cx = Math.min(Math.max(at[0], w/2 + 3), W - w/2 - 3);
+    text.setAttribute("x", cx); text.setAttribute("y", at[1]);
+    rect.setAttribute("x", cx - w/2); rect.setAttribute("y", at[1]-11);
+    rect.setAttribute("width", w); rect.setAttribute("height", 22); rect.setAttribute("rx", 11);
+    rect.setAttribute("style", `stroke:var(--c-${t})`);
+  }
+};
+
+function legend(ul, onPick){
+  ul.innerHTML = "";
+  const btns = {};
+  for (const k in TYPES){
+    const li = document.createElement("li");
+    const el = document.createElement(onPick ? "button" : "span");
+    if (onPick){ el.type = "button"; el.setAttribute("aria-pressed","false"); el.addEventListener("click", () => onPick(k)); }
+    else el.className = "item";
+    el.innerHTML = `<svg viewBox="0 0 34 12" aria-hidden="true"><path class="flow f-${k}" d="M2 6 H24" marker-end="url(#m-${k})"/></svg>${TYPES[k].name}`;
+    li.appendChild(el); ul.appendChild(li); btns[k] = el;
+  }
+  return btns;
+}
+
+/* ---------- section 1: explore ---------- */
+const COMPONENTS = {
+  executor:{
+    flows:["db","cmd","claim","evt","readback"],
+    owns:"Nothing durable. It serves the REST and GraphQL API, runs the dispatch loop (every 500ms), answers claims, consumes events, and reads stored data back.",
+    why:"It is the only process that decides what happens next, and it writes every decision to Postgres before acting on it.",
+    down:"The API is down. No new commands go out. A driver asking for a claim gets no answer, so it doesn't start anything. Events wait in JetStream. On restart it carries on from Postgres.",
+    code:"services/executor/send.go, receive.go, lifecycle.go, policy.go"
+  },
+  postgres:{
+    flows:["db"],
+    owns:"Runs and steps. Each step's lifecycle: every attempt and every fact received about it. Also the queue: which steps are pending or sent.",
+    why:"The single source of truth for intent. Each fact is applied in one transaction under the step's row lock, so a claim and a cancel can never both win.",
+    down:"Claims get no answer (the driver waits and asks again). Events are refused and redelivered after 1s. Nothing is lost; everything waits.",
+    code:"services/executor/store.go, db/init.sql"
+  },
+  corenats:{
+    flows:["cmd","claim"],
+    owns:"Nothing. Plain request and reply: a message with nobody listening is simply not delivered.",
+    why:"Commands must be fresh or not happen at all. A stored command could run late, after a cancel or after someone moved the plate. A lost command is just sent again, and the claim makes a late one harmless.",
+    down:"Commands and claims fail, and are sent again. A timeout means unknown, not \"not delivered\": in C1 a timed-out request arrived 20s late. <span class=\"tag t-meas\">measured</span>",
+    code:"<code>lab.&lt;device&gt;.cmd.run</code> (accepted | busy | known) · <code>lab.executor.claim</code> (go | abort)"
+  },
+  jetstream:{
+    flows:["evt"],
+    owns:"Facts in transit: started, finished, stored, data_lost. Stored on disk.",
+    why:"A fact must survive the executor being down. The driver retries until JetStream confirms it. The executor acks only after its database commit.",
+    down:"Delivery is at least once, not exactly once. A repeat within 2 minutes is dropped by its message id (<code>&lt;job id&gt;:&lt;kind&gt;</code>). After that, applying a fact twice changes nothing.",
+    code:"stream <code>LAB_EVENTS</code>, subjects <code>lab.&lt;device&gt;.evt.&lt;kind&gt;</code>, durable consumer \"executor\", ack wait 30s"
+  },
+  driver:{
+    flows:["cmd","claim","evt","upload","run"],
+    owns:"The one job in flight and, briefly, a read's bytes until they are uploaded. Nothing else: it rebuilds what it needs from the ledger.",
+    why:"Connects one instrument to the system. It claims before running, reads the outcome from the ledger (a hung job never returns from Run), publishes events, and uploads data.",
+    down:"On restart it first replays its ledger: it reports every job again (duplicates are harmless) and checks storage for each completed read.",
+    code:"services/driver/adapter.go · three drivers: liquid-handler-1, incubator-1, plate-reader-1"
+  },
+  instrument:{
+    flows:["run","ledger"],
+    owns:"The simulated device (instrument.go, fixed, not ours). One job at a time. It lives in the driver's process, so killing the driver restarts it too.",
+    why:"It is the thing whose physical actions must be recorded truthfully.",
+    down:"Faults come from <code>sha256(seed:device:step:attempt)</code>, with no run id, so a step meets the same fault in every run under one seed. A hung job never returns; after HANG_DURATION (30s) its ledger says hung. <span class=\"tag t-meas\">measured</span>",
+    code:"services/driver/instrument/instrument.go"
+  },
+  ledger:{
+    flows:["ledger"],
+    owns:"Physical truth: every job the instrument ran, when it started and ended, and how (completed, failed, hung). For a read, the sha256 of its data.",
+    why:"The best evidence of what happened. The record copies its times and outcomes. The entry is written before any physical work, and survives restarts.",
+    down:"A job cut off by a restart is marked hung, ending at the restart time. Not infallible: if its end-of-job write fails, a restart reports hung (K16). It knows nothing of pending, retryable or cancelled; that is our intent.",
+    code:"instrument.go · GET localhost:710{1,2,3}/status"
+  },
+  s3:{
+    flows:["upload","readback"],
+    owns:"Plate data, at <code>runs/&lt;run&gt;/&lt;step&gt;/&lt;attempt&gt;.csv</code>. The key comes from the job id, so a repeated upload overwrites instead of adding.",
+    why:"A read counts as completed only when the object here hashes to the ledger's sha256. The executor reads it back itself.",
+    down:"The driver keeps retrying and keeps the plate reader busy, because the bytes are only in its memory. The cost was the outage plus about 16s for SeaweedFS to restart (C4h). <span class=\"tag t-meas\">measured</span>",
+    code:"SeaweedFS 3.62 ignores create-only writes, so \"lost\" can never be made final (D3). <span class=\"tag t-meas\">measured</span>"
+  }
+};
+const TYPE_FLOWS = {cmd:["cmd"], claim:["claim"], evt:["evt"], data:["upload","readback"], state:["db","run","ledger"]};
+const TYPE_COMPS = {cmd:["executor","corenats","driver"], claim:["driver","corenats","executor"], evt:["driver","jetstream","executor"], data:["driver","s3","executor"], state:["executor","postgres","driver","instrument","ledger"]};
+const ARCH_LABELS = {db:"SQL", readback:"GET · sha256", cmd:"cmd.run", claim:"claim", evt:"events", upload:"PUT"};
+
+const pExplore = document.getElementById("panel-explore");
+let legendBtns;
+const dExplore = new Diagram(document.getElementById("dia-explore"), {onPick: pickComp});
+function exploreIntro(){
+  dExplore.set({labels:ARCH_LABELS});
+  pExplore.innerHTML = `<div class="kicker">Overview</div><h3>Eight parts, two sources of truth</h3>
+  <ul>
+    <li><b>Postgres</b> holds intent: what should run, and every fact received.</li>
+    <li><b>Each instrument's ledger</b> holds what physically happened.</li>
+    <li>Everything else carries messages between them, or stores the data that proves a read.</li>
+  </ul>
+  <p class="hint">Click any box, or a line type in the legend below the diagram.</p>`;
+  for (const k in legendBtns) legendBtns[k].setAttribute("aria-pressed","false");
+}
+function pickComp(id){
+  const c = COMPONENTS[id];
+  const flows = c.flows, labels = {};
+  flows.forEach(f => { if (ARCH_LABELS[f]) labels[f] = ARCH_LABELS[f]; });
+  const comps = new Set([id]);
+  if (id === "instrument" || id === "ledger") comps.add("driver");
+  dExplore.set({active:[...comps], flows, labels, select:id});
+  for (const k in legendBtns) legendBtns[k].setAttribute("aria-pressed","false");
+  pExplore.innerHTML = `<div class="kicker">Component</div><h3>${TITLES[id]}</h3>
+    <h4>Owns</h4><p>${c.owns}</p>
+    <h4>Why it's needed</h4><p>${c.why}</p>
+    <h4>${id==="instrument"?"Faults":id==="jetstream"?"Delivery":"When it fails"}</h4><p>${c.down}</p>
+    <p class="src">${c.code}</p>
+    <p><button class="btn" type="button" id="explore-back">Back to overview</button></p>`;
+  document.getElementById("explore-back").addEventListener("click", exploreIntro);
+}
+function pickType(k){
+  const labels = {};
+  TYPE_FLOWS[k].forEach(f => { if (ARCH_LABELS[f]) labels[f] = ARCH_LABELS[f]; });
+  dExplore.set({active:TYPE_COMPS[k], flows:TYPE_FLOWS[k], labels});
+  for (const b in legendBtns) legendBtns[b].setAttribute("aria-pressed", String(b === k));
+  const extra = {
+    cmd:`<ul><li>Reply <code>accepted</code>, <code>busy</code> or <code>known</code> (the driver already has this job).</li><li>Asked again after 500ms on busy or no answer, after 3s on accepted or known, until the job's <code>started</code> arrives.</li><li>A resend always carries the same job id, so it can never become a second attempt.</li></ul>`,
+    claim:`<ul><li>Recorded under the step's row lock, the same lock a cancel takes: exactly one of them wins.</li><li><code>go</code> runs the job. <code>abort</code> doesn't. No answer: don't run, ask again.</li><li>This is the last moment a cancel can stop a job.</li></ul>`,
+    evt:`<ul><li>Times and outcomes are copied from the ledger, not from the driver's clock.</li><li>Retried until JetStream confirms. Acked by the executor only after its database commit.</li><li>At least once, not exactly once: a duplicate is dropped by message id, or changes nothing when applied.</li></ul>`,
+    data:`<ul><li>The driver uploads to a key derived from the job id, then publishes <code>stored</code>.</li><li>The executor doesn't trust the event: it reads the object at the key it derives itself and compares sha256 with the ledger's.</li></ul>`,
+    state:`<ul><li>Executor ↔ Postgres: every fact is one transaction under the step's row lock.</li><li>Instrument → ledger: written before any physical work starts.</li></ul>`
+  }[k];
+  pExplore.innerHTML = `<div class="kicker">Message type</div><h3>${TYPES[k].name}</h3><p>${TYPES[k].text}</p>${extra}
+    <p><button class="btn" type="button" id="explore-back">Back to overview</button></p>`;
+  document.getElementById("explore-back").addEventListener("click", exploreIntro);
+}
+legendBtns = legend(document.getElementById("legend-explore"), pickType);
+exploreIntro();
+
+/* ---------- stepper ---------- */
+function renderRows(rows, prev){
+  const pm = {}; (prev||[]).forEach(r => pm[r[0]] = r[1]);
+  return `<table class="kv"><tbody>${rows.map(r => {
+    const chg = prev && pm[r[0]] !== r[1];
+    const v = r[1] === null ? `<span class="nil">null</span>` : r[1];
+    return `<tr${chg?' class="chg"':''}><td>${r[0]}</td><td>${v}</td></tr>`;
+  }).join("")}</tbody></table>`;
+}
+function Stepper(opts){
+  this.o = opts; this.i = 0; this.seen = new Set([0]);
+  const c = opts.controls;
+  c.innerHTML = `<button class="btn" type="button" data-a="back">← Back</button>
+    <button class="btn primary" type="button" data-a="next">Next →</button>
+    <button class="btn" type="button" data-a="reset">Reset</button>
+    <span class="count" aria-live="polite"></span>
+    <div class="dots" role="group" aria-label="Jump to step"></div>`;
+  c.querySelector('[data-a="back"]').addEventListener("click", () => this.go(this.i-1));
+  c.querySelector('[data-a="next"]').addEventListener("click", () => this.go(this.i+1));
+  c.querySelector('[data-a="reset"]').addEventListener("click", () => { this.seen = new Set(); this.go(0); });
+  opts.section.addEventListener("keydown", e => {
+    if (e.target.closest("input,textarea,select")) return;
+    if (e.key === "ArrowRight"){ e.preventDefault(); this.go(this.i+1); }
+    if (e.key === "ArrowLeft"){ e.preventDefault(); this.go(this.i-1); }
+  });
+  this.load(opts.steps);
+}
+Stepper.prototype.load = function(steps){
+  this.steps = steps; this.seen = new Set();
+  const dots = this.o.controls.querySelector(".dots");
+  dots.innerHTML = steps.map((s,i) => `<button class="dot" type="button" data-i="${i}" aria-label="Step ${i+1}: ${esc(s.title)}">${i+1}</button>`).join("");
+  dots.querySelectorAll(".dot").forEach(b => b.addEventListener("click", () => this.go(+b.dataset.i)));
+  this.i = -1; this.go(0);
+};
+Stepper.prototype.go = function(i){
+  const n = this.steps.length;
+  if (i < 0 || i >= n) return;
+  this.i = i; this.seen.add(i);
+  const s = this.steps[i], prev = i > 0 ? this.steps[i-1] : null;
+  this.o.diagram.set(s.dia);
+  const badge = s.badge ? `<span class="badge b-${s.badge[0]}">${s.badge[1]}</span>` : "";
+  this.o.panel.innerHTML = `<div class="kicker">Step ${i+1} of ${n}${s.phase?` · phase <code>${s.phase}</code>`:""}</div>
+    <h3>${s.title}</h3>${badge}
+    <ul>${s.what.map(w => `<li>${w}</li>`).join("")}</ul>
+    ${s.api ? `<h4>${s.apiTitle || "API says · GET /runs/{id}"}</h4>${renderRows(s.api, prev && prev.api)}` : ""}
+    ${s.ev ? `<h4>Evidence</h4>${renderRows(s.ev, prev && prev.ev)}` : ""}
+    ${s.why ? `<div class="why">${s.why}</div>` : ""}`;
+  const c = this.o.controls;
+  c.querySelector('[data-a="back"]').disabled = i === 0;
+  c.querySelector('[data-a="next"]').disabled = i === n-1;
+  c.querySelector(".count").textContent = `Step ${i+1} of ${n}`;
+  c.querySelectorAll(".dot").forEach((b,j) => {
+    if (j === i) b.setAttribute("aria-current","step"); else b.removeAttribute("aria-current");
+    b.classList.toggle("seen", this.seen.has(j));
+  });
+  if (this.o.onChange) this.o.onChange(i, n);
+};
+
+/* ---------- section 2: follow a run ---------- */
+const J = "run-3c9e/read_plate/1";
+const FOLLOW = [
+  {title:"The step becomes ready", phase:"pending", badge:["intent","Intent only"],
+   dia:{active:["executor","postgres"], flows:["db"], labels:{db:"SQL"}, deck:"plate-reader-1"},
+   what:["Earlier steps of PCR Amplification have completed; <code>combine</code> was the last one before the read.",
+         "The dispatch loop wakes every 500ms, or at once when a fact arrives, and asks Postgres which steps are ready."],
+   api:[["run.status","running"],["read_plate.status","pending"],["started_at",null],["finished_at",null],["data_ref",null]],
+   ev:[["ledger","no entry for this job"],["S3","nothing"]],
+   why:"Postgres is the queue. There is no queue in NATS, so a command can't sit somewhere and run later."},
+  {title:"Dispatch: record first, then send", phase:"dispatched", badge:["intent","Intent only"],
+   dia:{active:["executor","postgres","corenats","driver"], flows:["db","cmd"], labels:{cmd:"cmd.run …/read_plate/1"}, deck:"plate-reader-1"},
+   what:[`The executor records attempt 1, job id <code>${J}</code>, then sends <code>lab.plate-reader-1.cmd.run</code>.`,
+         "The driver answers <code>accepted</code>. Had it said <code>busy</code>, or not answered, the executor would ask again after 500ms.",
+         "No answer means <b>unknown</b>: the executor sends the same job id again, never a new attempt."],
+   api:[["run.status","running"],["read_plate.status","pending"],["started_at",null],["finished_at",null],["data_ref",null]],
+   ev:[["ledger","no entry for this job"],["S3","nothing"]],
+   why:"The job id is <code>&lt;run&gt;/&lt;step&gt;/&lt;attempt&gt;</code>. It stays the same on every resend, which is what makes a resend safe."},
+  {title:"Claim: ask before touching the instrument", phase:"claimed", badge:["intent","Permission, not evidence"],
+   dia:{active:["driver","corenats","executor","postgres"], flows:["claim","db"], labels:{claim:"claim → go"}, deck:"plate-reader-1"},
+   what:["The driver asks <code>lab.executor.claim</code>. The executor records the claim under the step's row lock, the same lock a cancel takes, and answers <code>go</code>.",
+         "From now on a cancel can no longer stop this job: the driver may already be starting it.",
+         "Until <code>started</code> arrives, the executor resends the command every 3s. The driver answers <code>known</code>."],
+   api:[["run.status","running"],["read_plate.status","running"],["started_at",null],["finished_at",null],["data_ref",null]],
+   ev:[["ledger","no entry for this job"],["S3","nothing"]],
+   why:"The API says <code>running</code>, but nothing physical has happened yet, so <code>started_at</code> stays null. Only the ledger can supply it."},
+  {title:"The instrument runs it; started goes to JetStream", phase:"running", badge:["known","Known: it started"],
+   dia:{active:["driver","instrument","ledger","jetstream","executor","postgres"], flows:["run","ledger","evt","db"], labels:{evt:"started"}, deck:"plate-reader-1"},
+   what:["The driver calls Run. The instrument writes its ledger entry before any physical work.",
+         "The driver reads the ledger (every 50ms) and publishes <code>started</code> with the ledger's start time. It retries until JetStream confirms.",
+         "The executor applies it in one transaction, then acks. It stops resending the command."],
+   api:[["run.status","running"],["read_plate.status","running"],["started_at","12:00:08.214 (ledger)"],["finished_at",null],["data_ref",null]],
+   ev:[["ledger","running since 12:00:08.214"],["S3","nothing"]],
+   why:"Times come from the ledger, not from when the executor heard about it."},
+  {title:"Finished: completed on the instrument, not yet in the record", phase:"storing", badge:["unknown","Not enough for a read"],
+   dia:{active:["instrument","ledger","driver","jetstream","executor","postgres"], flows:["ledger","evt","db"], labels:{evt:"finished · sha256"}, deck:"plate-reader-1"},
+   what:["The ledger says <code>completed</code>, with the sha256 of the data.",
+         "The driver publishes <code>finished</code> with the outcome, both times and the sha256.",
+         "For a read, that isn't enough. The bytes exist only in the driver's memory, so the step stays <code>running</code>."],
+   api:[["run.status","running"],["read_plate.status","running"],["started_at","12:00:08.214 (ledger)"],["finished_at","12:00:10.216 (ledger)"],["data_ref",null]],
+   ev:[["ledger","completed · sha256 9f2c…41ab"],["S3","nothing yet"]],
+   why:"If the driver crashed now, the data would be gone. A <code>completed</code> here would be a claim without evidence."},
+  {title:"Upload, then stored", phase:"storing", badge:["unknown","Stored, not yet verified"],
+   dia:{active:["driver","s3","jetstream"], flows:["upload","evt"], labels:{upload:"PUT", evt:"stored"}, deck:"plate-reader-1"},
+   what:[`The driver PUTs the bytes to <code>runs/${J}.csv</code>, retrying until storage accepts them. Meanwhile it keeps the plate reader busy.`,
+         "Then it publishes <code>stored</code>."],
+   api:[["run.status","running"],["read_plate.status","running"],["started_at","12:00:08.214 (ledger)"],["finished_at","12:00:10.216 (ledger)"],["data_ref",null]],
+   ev:[["ledger","completed · sha256 9f2c…41ab"],["S3",`object at runs/${J}.csv`]],
+   why:"The key comes from the job id, so a repeated upload overwrites the same object instead of adding another."},
+  {title:"Verify: read it back and compare hashes", phase:"completed", badge:["known","Known: data verified"],
+   dia:{active:["executor","s3","postgres"], flows:["readback","db"], labels:{readback:"GET · sha256"}, deck:"plate-reader-1"},
+   what:["The executor doesn't take <code>stored</code> on trust. It reads the object at the key it derives itself and hashes it.",
+         "The sha256 equals the ledger's, so the read is completed. Only now does it get a <code>data_ref</code>."],
+   api:[["run.status","running"],["read_plate.status","completed"],["started_at","12:00:08.214 (ledger)"],["finished_at","12:00:10.216 (ledger)"],["data_ref",`s3://lab-data/runs/${J}.csv`]],
+   ev:[["ledger","completed · sha256 9f2c…41ab"],["S3","object sha256 9f2c…41ab ✓"]],
+   why:"Once verified, the step stays completed. A later mismatch is reported as a warning in <code>error</code>; the status doesn't go backwards (D2)."},
+  {title:"The run finishes", phase:"completed", badge:["known","Known: every step verified"],
+   dia:{active:["executor","postgres"], flows:["db"], labels:{db:"SQL"}, deck:"plate-reader-1"},
+   what:["No step is in flight and every step completed, so the run is <code>completed</code>.",
+         "Its <code>finished_at</code> is the last ledger time, not the moment the executor noticed.",
+         "GraphQL shows more of the same rows: the internal phase, every attempt, and each storage read-back with <code>matches: true</code>."],
+   api:[["run.status","completed"],["read_plate.status","completed"],["started_at","12:00:08.214 (ledger)"],["finished_at","12:00:10.216 (ledger)"],["data_ref",`s3://lab-data/runs/${J}.csv`]],
+   ev:[["ledger","completed · sha256 9f2c…41ab"],["S3","object sha256 9f2c…41ab ✓"]],
+   why:"Every claim in the record now points to evidence: times and outcome to the ledger, data to an object with the same hash."}
+];
+const dFollow = new Diagram(document.getElementById("dia-follow"));
+legend(document.getElementById("legend-follow"));
+new Stepper({steps:FOLLOW, diagram:dFollow, panel:document.getElementById("panel-follow"),
+  controls:document.getElementById("ctl-follow"), section:document.getElementById("follow")});
+
+/* ---------- section 3: failures ---------- */
+const R = "run-3c9e/read_plate";
+const PR = "plate-reader-1";
+const SCEN = {
+  claimcrash:{
+    tab:"Driver crashes before the job starts",
+    steps:[
+      {title:"Claimed", phase:"claimed", badge:["intent","Permission, not evidence"],
+       dia:{active:["executor","corenats","driver","postgres"], flows:["claim","db"], labels:{claim:"claim → go"}, deck:PR},
+       what:["<code>read_plate</code> was sent and claimed: the executor answered <code>go</code>.",
+             "The driver is about to call Run. Nothing is in the ledger yet."],
+       api:[["read_plate.status","running"],["started_at",null],["attempts","1"]],
+       ev:[["ledger","no entry for …/1"]]},
+      {title:"The driver dies before Run", phase:"claimed", badge:["unknown","Unknown: did it start?"],
+       dia:{active:["executor","corenats"], flows:["cmd"], down:["driver","instrument"], labels:{cmd:"cmd.run …/1 (no answer)"}, deck:PR},
+       what:["The executor keeps sending the <b>same</b> command. Nobody answers, so it asks again every 500ms.",
+             "From the outside it can't tell whether the job started. The record stays <code>running</code>: it isn't failed, and there is no new attempt."],
+       api:[["read_plate.status","running"],["started_at",null],["attempts","1"]],
+       ev:[["ledger","no entry for …/1"]],
+       why:"No timer turns \"no answer\" into \"failed\". In C1 a request that timed out was delivered 20s later. <span class=\"tag t-meas\">measured</span>"},
+      {title:"The driver restarts and is asked again", phase:"claimed", badge:["known","Known: it never started"],
+       dia:{active:["executor","corenats","driver","ledger"], flows:["cmd"], labels:{cmd:"cmd.run …/1 → accepted"}, deck:PR},
+       what:["The driver first replays its ledger. There is nothing for this job.",
+             "The next resend arrives. The job isn't in flight and isn't in the ledger, so the driver answers <code>accepted</code>.",
+             "That answer is evidence: the ledger is written before any physical work, so a job missing from it never started."],
+       api:[["read_plate.status","running"],["started_at",null],["attempts","1"]],
+       ev:[["ledger","no entry for …/1"]]},
+      {title:"Claim again → go", phase:"claimed", badge:["intent","Same job, same attempt"],
+       dia:{active:["driver","corenats","executor","postgres"], flows:["claim","db"], labels:{claim:"claim …/1 → go"}, deck:PR},
+       what:["The driver claims the job again. It is already claimed and nothing cancelled it, so the executor answers <code>go</code> again.",
+             "It is still attempt 1. A resend never creates a new attempt."],
+       api:[["read_plate.status","running"],["started_at",null],["attempts","1"]],
+       ev:[["ledger","no entry for …/1"]]},
+      {title:"It runs, once", phase:"completed", badge:["known","Known: one execution"],
+       dia:{active:["driver","instrument","ledger","jetstream","executor","s3","postgres"], flows:["run","ledger","evt","upload","readback","db"], labels:{evt:"started · finished · stored"}, deck:PR},
+       what:["The usual path follows: started, finished, upload, stored, verified.",
+             "The ledger has exactly one execution of <code>…/read_plate/1</code>."],
+       api:[["read_plate.status","completed"],["started_at","ledger time"],["attempts","1"]],
+       ev:[["ledger","…/1 completed, once"],["S3","…/1.csv, hash matches ✓"]],
+       why:"Measured live in the resend PR (#18): a driver killed after its claim, before starting. The job ran once after the restart. <span class=\"tag t-meas\">measured</span>"}
+    ],
+    summary:[["Outcome","completed, from one execution"],["Retried?","No. The same job was sent again, not a new attempt."],["While unknown","the step said running, with no start time"],
+      ["Other branches","A cancel while the driver was down: the second claim is withdrawn and answered <code>abort</code>, and the step ends cancelled (D5). If the driver never comes back, the step stays running for ever (K6)."]]
+  },
+  midcrash:{
+    tab:"Driver crashes during a job",
+    steps:[
+      {title:"Running", phase:"running", badge:["known","Known: it started"],
+       dia:{active:["driver","instrument","ledger","executor"], flows:["run","ledger","evt"], labels:{evt:"started"}, deck:PR},
+       what:["<code>read_plate</code> attempt 1 is running. <code>started</code> has been recorded."],
+       api:[["read_plate.status","running"],["started_at","12:00:08.2 (ledger)"],["finished_at",null]],
+       ev:[["ledger","…/1 running"]]},
+      {title:"The driver is killed mid-read", phase:"running", badge:["unknown","Unknown: did the read finish?"],
+       dia:{active:["executor","ledger"], flows:[], down:["driver","instrument"], deck:PR},
+       what:["The simulated instrument lives in the driver process, so it goes too. The ledger file on disk still says <code>running</code>.",
+             "The executor doesn't resend a step that has started. It waits for evidence."],
+       api:[["read_plate.status","running"],["started_at","12:00:08.2 (ledger)"],["finished_at",null]],
+       ev:[["ledger","…/1 running (file on disk)"]]},
+      {title:"Restart: the ledger closes the job as hung", phase:"ended", badge:["known","Known: hung, outcome of the work unknown"],
+       dia:{active:["instrument","ledger","driver","jetstream","executor"], flows:["evt"], labels:{evt:"finished (hung)"}, deck:PR},
+       what:["On start the instrument finds the job still <code>running</code> and marks it <code>hung</code>, ending at the restart: \"instrument restarted during the job\".",
+             "The driver replays its ledger: <code>started</code>, then <code>finished(hung)</code>.",
+             "Attempt 1 is recorded as hung. Nothing says completed, and nothing says the plate was read."],
+       api:[["read_plate.status","running"],["error","instrument hung; outcome unknown"],["attempts","1"]],
+       ev:[["ledger","…/1 hung, finished at the restart"]],
+       why:"The end time is the restart, not when the work really stopped. That is the ledger's time, the best evidence there is."},
+      {title:"The policy retries: the plate reader is safe to repeat", phase:"retrying", badge:["intent","New attempt, new job id"],
+       dia:{active:["executor","postgres","corenats","driver"], flows:["db","cmd"], labels:{cmd:"cmd.run …/read_plate/2"}, deck:PR},
+       what:["<code>plate-reader-1</code> is in <code>REPEAT_SAFE</code>, and 1 of 3 attempts has been used.",
+             "So attempt 2 is dispatched, with a new job id <code>…/read_plate/2</code>. Attempt 1 is kept."],
+       api:[["read_plate.status","running"],["error",null],["attempts","2"]],
+       ev:[["ledger","…/1 hung"]],
+       why:"Reading a plate again doesn't change the plate. Repeating a hung dispense or incubation might."},
+      {title:"Attempt 2 completes and is verified", phase:"completed", badge:["known","Known: data verified"],
+       dia:{active:["driver","instrument","ledger","jetstream","executor","s3"], flows:["run","ledger","evt","upload","readback"], labels:{readback:"GET · sha256"}, deck:PR},
+       what:["The step is decided by attempt 2: its times, and <code>data_ref …/read_plate/2.csv</code>.",
+             "GraphQL lists both attempts: 1 hung, 2 completed. REST shows only the one that decided."],
+       api:[["read_plate.status","completed"],["data_ref",`s3://lab-data/runs/${R}/2.csv`],["attempts","2 (1 hung, 2 decided)"]],
+       ev:[["ledger","…/1 hung, …/2 completed"],["S3","…/2.csv, hash matches ✓"]],
+       why:"Measured in C4c: 8 ledger executions for a 7-step run, every one matching an attempt in the record. <span class=\"tag t-meas\">measured</span>"}
+    ],
+    summary:[["Outcome","completed, by attempt 2"],["Retried?","Yes: a new attempt, because the plate reader is listed as safe to repeat"],
+      ["On the liquid handler","The same crash ends the step <code>failed</code>: \"instrument hung; outcome unknown; not repeated: liquid-handler-1 is not safe to repeat\". The later steps are never sent, and the run is failed (C4d, measured)."],
+      ["Side effect","Two ledger executions for one step, so acceptance check 5 flags it (K5). That is honest, not a bug."]]
+  },
+  hang:{
+    tab:"Instrument hangs: retry or not",
+    variants:{reader:"plate-reader-1 (safe to repeat)", lh:"liquid-handler-1 (not safe to repeat)"},
+    steps:function(v){
+      const dev = v === "lh" ? "liquid-handler-1" : PR, step = v === "lh" ? "fill_sample_plate" : "read_plate";
+      const base = [
+        {title:"The instrument hangs", phase:"running", badge:["unknown","Unknown: still working?"],
+         dia:{active:["driver","instrument","ledger","executor"], flows:["run","ledger"], deck:dev},
+         what:[`<code>${step}</code> started. Then the instrument hangs: its Run call never returns.`,
+               "The driver watches the ledger, not Run's return, so it isn't stuck waiting for a reply that will never come.",
+               "The record says <code>running</code>, with no error."],
+         api:[[`${step}.status`,"running"],["error",null],["attempts","1"]],
+         ev:[["ledger",`…/${step}/1 running`]]},
+        {title:"30s later, the instrument gives up", phase:"ended", badge:["known","Known: hung, outcome of the work unknown"],
+         dia:{active:["instrument","ledger","driver","jetstream","executor"], flows:["ledger","evt"], labels:{evt:"finished (hung)"}, deck:dev},
+         what:["After <code>HANG_DURATION</code> (30s) the ledger records <code>hung</code>, with an end time.",
+               "The driver publishes <code>finished(hung)</code>. The attempt has ended, but nobody knows what it did."],
+         api:[[`${step}.status`,"running"],["error","instrument hung; outcome unknown"],["attempts","1"]],
+         ev:[["ledger",`…/${step}/1 hung`]],
+         why:"There is no timer in our code. A retry waits for the instrument's own report, so it is never sent to a frozen instrument."}
+      ];
+      if (v === "lh") return base.concat([
+        {title:"Not repeated: the step fails, with its reason", phase:"failed", badge:["known","Known: failed, and why"],
+         dia:{active:["executor","postgres"], flows:["db"], deck:dev},
+         what:["<code>liquid-handler-1</code> is not in <code>REPEAT_SAFE</code>. A hung dispense may have moved some, all or none of the liquid. Repeating it could double it.",
+               "So the step is <code>failed</code>, and the error says exactly that."],
+         api:[[`${step}.status`,"failed"],["error","instrument hung; outcome unknown; not repeated: liquid-handler-1 is not safe to repeat"],["attempts","1"]],
+         ev:[["ledger",`…/${step}/1 hung`]],
+         why:"<code>failed</code> doesn't claim the dispense failed. The error says the outcome is unknown and why we stopped."},
+        {title:"The run ends failed", phase:"failed", badge:["known","Known: nothing else ran"],
+         dia:{active:["executor","postgres"], flows:["db"], deck:dev},
+         what:["The other six steps all depend on it, so none is ever sent. They stay <code>pending</code>, which is true.",
+               "The run is <code>failed</code>. Its <code>finished_at</code> is the hung execution's ledger time."],
+         api:[["run.status","failed"],[`${step}.status`,"failed"],["other 6 steps","pending"]],
+         ev:[["ledger",`…/${step}/1 hung, nothing after it`]],
+         why:"Measured in C3a: at seed 0 this step hangs in every PCR run, because the fault roll has no run id. <span class=\"tag t-meas\">measured</span>"}
+      ]);
+      return base.concat([
+        {title:"Safe to repeat: attempt 2 at once", phase:"retrying", badge:["intent","New attempt, new job id"],
+         dia:{active:["executor","postgres","corenats","driver"], flows:["db","cmd"], labels:{cmd:"cmd.run …/read_plate/2"}, deck:dev},
+         what:["<code>plate-reader-1</code> is in <code>REPEAT_SAFE</code>, and attempts are capped at 3.",
+               "Attempt 2 was dispatched 31ms after the hang was recorded (C3b)."],
+         api:[[`${step}.status`,"running"],["error",null],["attempts","2"]],
+         ev:[["ledger",`…/${step}/1 hung`]]},
+        {title:"Attempt 2 completes", phase:"completed", badge:["known","Known: data verified"],
+         dia:{active:["driver","instrument","ledger","jetstream","executor","s3"], flows:["run","ledger","evt","upload","readback"], labels:{readback:"GET · sha256"}, deck:dev},
+         what:["Verified as usual. The step is decided by attempt 2. Attempt 1 is kept in the history.",
+               "The cost was the whole hang: C3b took 36s instead of about 6s."],
+         api:[[`${step}.status`,"completed"],["data_ref",`s3://lab-data/runs/${R}/2.csv`],["attempts","2 (1 hung, 2 decided)"]],
+         ev:[["ledger",`…/${step}/1 hung, …/2 completed`],["S3","…/2.csv, hash matches ✓"]],
+         why:"Measured in C3b. If all 3 attempts hang, the step fails with \"not repeated: 3 attempts made\" (C4j). <span class=\"tag t-meas\">measured</span>"}
+      ]);
+    },
+    summary:function(v){ return v === "lh"
+      ? [["Outcome","failed, with the reason \"outcome unknown; not repeated\""],["Retried?","No. The liquid handler isn't listed as safe to repeat."],["Why not invent","The record doesn't say the dispense happened or didn't. It says the outcome is unknown, and why we stopped."]]
+      : [["Outcome","completed, by attempt 2"],["Retried?","Yes, at most 3 attempts in total"],["Other causes","A failure is retried only if the instrument marks it retryable (the incubator and plate reader do; the liquid handler doesn't)."]]; }
+  },
+  lost:{
+    tab:"Lost read, then a late upload",
+    steps:[
+      {title:"The read completes while storage is down", phase:"storing", badge:["unknown","Not enough for a read"],
+       dia:{active:["instrument","ledger","driver","jetstream","executor"], flows:["evt","upload"], down:["s3"], labels:{evt:"finished · sha256", upload:"PUT (failing)"}, deck:PR},
+       what:["The ledger says <code>completed</code>, with the sha256. The executor records it, but the step stays <code>running</code>.",
+             "The driver retries the upload every 0.5s and keeps the plate reader busy. The bytes are only in its memory."],
+       api:[["read_plate.status","running"],["error",null],["data_ref",null]],
+       ev:[["ledger","…/1 completed · sha256 4c72…"],["S3","no object"]]},
+      {title:"The driver crashes: the bytes are gone", phase:"storing", badge:["unknown","Unknown: will the data appear?"],
+       dia:{active:["executor","ledger"], flows:[], down:["driver","instrument","s3"], deck:PR},
+       what:["The record doesn't change. It doesn't know about the crash yet, and nothing it claims is false.",
+             "An upload sent just before the crash could still be committed by storage later. Nothing bounds how late."],
+       api:[["read_plate.status","running"],["error",null],["data_ref",null]],
+       ev:[["ledger","…/1 completed · sha256 4c72…"],["S3","no object"]]},
+      {title:"Restart: storage still has nothing → data_lost", phase:"unresolved", badge:["unknown","Unresolved, not failed"],
+       dia:{active:["driver","s3","jetstream","executor"], flows:["evt"], labels:{evt:"data_lost"}, deck:PR},
+       what:["Replay asks storage for the object. It is absent, and still absent after the upload grace (10s).",
+             "The driver reports <code>data_lost</code>. The attempt is <b>unresolved</b>, and the error says why."],
+       api:[["read_plate.status","running"],["error","driver lost the data before it was confirmed stored; an earlier upload may still appear in storage"],["data_ref",null]],
+       ev:[["ledger","…/1 completed · sha256 4c72…"],["S3","no object"]],
+       why:"\"Absent now\" is not \"lost\". To make loss final, storage would need to refuse a late write, and SeaweedFS 3.62 ignores create-only writes. <span class=\"tag t-meas\">measured</span>"},
+      {title:"Re-read at once, and keep looking for the original", phase:"retrying", badge:["intent","Attempt 2, attempt 1 still open"],
+       dia:{active:["executor","postgres","corenats","driver","s3"], flows:["db","cmd","readback"], labels:{cmd:"cmd.run …/read_plate/2", readback:"look for …/1.csv"}, deck:PR},
+       what:["<code>plate-reader-1</code> is in <code>REREAD_ON_DATA_LOSS</code>, so attempt 2 reads the plate again.",
+             "Attempt 1 stays open beside it. Every 10s the executor looks in storage for <code>…/read_plate/1.csv</code>."],
+       api:[["read_plate.status","running"],["attempts","2 (1 unresolved, 2 running)"],["data_ref",null]],
+       ev:[["ledger","…/1 completed, …/2 running"],["S3","no object for …/1"]]},
+      {title:"Whichever is verified first decides", phase:"completed", badge:["known","Known: data verified"],
+       dia:{active:["executor","s3","postgres"], flows:["readback","db"], labels:{readback:"GET · sha256"}, deck:PR},
+       what:["The late upload of attempt 1 lands. The next check finds it, and its hash equals attempt 1's ledger sha256: the step completes with <code>…/1.csv</code>.",
+             "If attempt 2 had been verified first, it would decide instead, with <code>…/2.csv</code>. Either way, <code>data_ref</code> points to an object with the hash its own execution measured.",
+             "Facts that arrive later for the other attempt are still recorded."],
+       api:[["read_plate.status","completed"],["attempts","2, the first one verified decides"],["data_ref",`s3://lab-data/runs/${R}/1.csv`]],
+       ev:[["ledger","…/1 completed · sha256 4c72…"],["S3","…/1.csv sha256 4c72… ✓"]],
+       why:"C2 measured the late-upload path, standing in for it with a manual PUT, before re-reads existed. The re-read path is covered by unit tests, not re-run live. <span class=\"tag t-meas\">measured</span> <span class=\"tag t-inf\">tested</span>"},
+      {title:"If neither ever arrives", phase:"unresolved", badge:["bad","Stuck, but still true"],
+       dia:{active:["executor","postgres"], flows:["db"], deck:PR},
+       what:["If every re-read also fails or loses its data, and the original never appears, the step stays unresolved and the run <code>running</code> for ever.",
+             "The planned operator action (\"abandon this step\") was not built (K39). The record never invents a failure to make the run end."],
+       api:[["read_plate.status","running"],["run.status","running"]],
+       ev:[["S3","no matching object"]]}
+    ],
+    summary:[["Outcome","completed by whichever attempt is verified first, or still open"],["Retried?","Yes: a re-read, while the lost attempt stays open"],
+      ["Why not invent","Failing the read would be false the moment the late upload landed. An early version did exactly that, and C2 caught it."]]
+  },
+  cancel:{
+    tab:"Cancel mid-run",
+    steps:[
+      {title:"About 3s into PCR Amplification", phase:null, badge:["known","Two steps physically running"],
+       apiTitle:"API says · step statuses",
+       dia:{active:["executor","driver","instrument","ledger"], flows:["run","ledger"], deckTitle:"Two drivers busy", deckSub:"liquid-handler-1, incubator-1"},
+       what:["<code>fill_sample_plate</code> has completed. <code>incubate_samples</code> and <code>fill_reagent_plate</code> are running.",
+             "<code>fill_buffer_plate</code> has been sent, but the liquid handler is busy, so it isn't claimed. The rest are pending."],
+       api:[["fill_sample_plate","completed"],["incubate_samples","running"],["fill_reagent_plate","running"],["fill_buffer_plate","pending (sent)"],["later 3 steps","pending"]],
+       ev:[["ledgers","fill_sample_plate completed; 2 jobs running"]]},
+      {title:"POST /runs/{id}/cancel: one transaction", phase:null, badge:["intent","Intent: stop what hasn't started"],
+       apiTitle:"API says · step statuses",
+       dia:{active:["executor","postgres"], flows:["db"], labels:{db:"lock all steps"}, deckTitle:"Two drivers busy", deckSub:"liquid-handler-1, incubator-1"},
+       what:["Every step of the run is locked in position order, then cancelled:",
+             "<b>completed</b> stays completed · <b>claimed or running</b> is not stopped (it may be moving liquid) · <b>sent, not claimed</b> is cancelled · <b>pending</b> is cancelled, never sent.",
+             "The run stays <code>running</code> while work is in flight. GraphQL shows <code>cancelRequested: true</code>."],
+       api:[["fill_sample_plate","completed"],["incubate_samples","running"],["fill_reagent_plate","running"],["fill_buffer_plate","cancelled"],["later 3 steps","cancelled"]],
+       ev:[["ledgers","fill_sample_plate completed; 2 jobs running"]]},
+      {title:"A late claim loses the race", phase:null, badge:["known","Known: never started"],
+       apiTitle:"API says · step statuses",
+       dia:{active:["driver","corenats","executor","postgres"], flows:["claim","db"], labels:{claim:"claim → abort"}, deck:"liquid-handler-1"},
+       what:["Suppose the liquid handler had freed up and accepted <code>fill_buffer_plate</code> just before the cancel. Its claim arrives now.",
+             "Claim and cancel take the same row lock. The cancel came first, so the answer is <code>abort</code>, and the job never runs."],
+       api:[["fill_buffer_plate","cancelled"]],
+       ev:[["ledger","no entry for fill_buffer_plate"]],
+       why:"Commands expiring, or a cancel broadcast, would only make the window smaller. The lock closes it."},
+      {title:"Running work finishes and is recorded", phase:null, badge:["known","Known: late facts win"],
+       apiTitle:"API says · step statuses",
+       dia:{active:["instrument","ledger","driver","jetstream","executor"], flows:["evt"], labels:{evt:"finished"}, deckTitle:"Two drivers busy", deckSub:"liquid-handler-1, incubator-1"},
+       what:["<code>incubate_samples</code> and <code>fill_reagent_plate</code> finish. Their <code>finished</code> events are recorded as usual.",
+             "No step is retried after a cancel."],
+       api:[["incubate_samples","completed"],["fill_reagent_plate","completed"],["fill_buffer_plate","cancelled"],["later 3 steps","cancelled"]],
+       ev:[["ledgers","3 jobs completed, nothing else"]]},
+      {title:"The run ends cancelled", phase:null, badge:["known","Known: the cancel is why the rest didn't run"],
+       apiTitle:"API says · run",
+       dia:{active:["executor","postgres"], flows:["db"], deckTitle:"Two drivers busy", deckSub:"liquid-handler-1, incubator-1"},
+       what:["Once nothing is in flight: not every step completed, and none failed on its own, so the run is <code>cancelled</code>.",
+             "If <code>fill_reagent_plate</code> had failed (liquid-handler failures aren't retryable), the run would be <code>failed</code>: that failure would have happened anyway.",
+             "If <code>incubate_samples</code> had failed in a retryable way, the step would say \"not retried: cancelled\", and the run would still be <code>cancelled</code>."],
+       api:[["run.status","cancelled"],["finished_at","last ledger time"]],
+       ev:[["ledgers","every recorded step matches an execution"]]}
+    ],
+    summary:[["Outcome","cancelled, with the work that did run recorded as completed"],["Retried?","Never after a cancel"],
+      ["Why not invent","A cancel never hides work that physically ran, and never undoes a completion. A step that ran keeps its own outcome."]]
+  },
+  exec:{
+    tab:"Executor crashes or is cut off",
+    steps:[
+      {title:"The executor goes away mid-read", phase:"running", badge:["known","Known: the read had started"],
+       dia:{active:["driver","instrument","ledger","postgres"], flows:["run","ledger"], down:["executor"], deck:PR},
+       what:["<code>read_plate</code> is running. The executor crashes, or is cut off from the network.",
+             "The API is served by the executor, so it is unavailable too. Postgres still holds every decision made so far."],
+       api:[["GET /runs/{id}","unavailable"]],
+       ev:[["ledger","…/1 running"],["Postgres","read_plate running"]]},
+      {title:"The facts wait in JetStream", phase:"running", badge:["known","Known, not yet recorded"],
+       dia:{active:["driver","instrument","ledger","jetstream","s3"], flows:["ledger","evt","upload"], down:["executor"], labels:{evt:"finished · stored", upload:"PUT"}, deck:PR},
+       what:["The read completes. The driver uploads the data and publishes <code>finished</code> and <code>stored</code>. JetStream confirms both and keeps them on disk.",
+             "A driver that needed a claim now would get no answer, so it wouldn't start anything."],
+       api:[["GET /runs/{id}","unavailable"]],
+       ev:[["ledger","…/1 completed · sha256"],["JetStream","finished, stored (unacked)"],["S3","…/1.csv"]]},
+      {title:"Back: resume from Postgres and the stream", phase:"completed", badge:["known","Known: data verified"],
+       dia:{active:["executor","postgres","jetstream","s3"], flows:["evt","readback","db"], labels:{evt:"redelivered", readback:"GET · sha256"}, deck:PR},
+       what:["The executor reads its state from Postgres. Nothing in its memory needed saving.",
+             "Its consumer receives the waiting events, applies each in a transaction, then acks. It reads the object back and verifies the hash.",
+             "An event that was handed to it just as it was cut off is redelivered only after the 30s ack wait (K62)."],
+       api:[["read_plate.status","completed"],["finished_at","ledger time, not when it noticed"],["data_ref",`s3://lab-data/runs/${R}/1.csv`]],
+       ev:[["ledger","…/1 completed"],["S3","hash matches ✓"]],
+       why:"Measured in C4f: an 8s cut delayed the run by 30s (41s instead of about 11s). The record was behind, never false. <span class=\"tag t-meas\">measured</span>"}
+    ],
+    summary:[["Outcome","completed, late"],["Retried?","Nothing physical. Events are redelivered, and repeats are harmless."],
+      ["Limit","Up to 30s of lag after a network cut (K62). One executor is assumed (K56)."]]
+  }
+};
+const ORDERED = ["claimcrash","midcrash","hang","lost","cancel","exec"];
+const dFail = new Diagram(document.getElementById("dia-fail"));
+legend(document.getElementById("legend-fail"));
+const tabs = document.getElementById("tabs"), variantEl = document.getElementById("variant"), summaryEl = document.getElementById("summary-fail");
+let current = "claimcrash", variant = "reader";
+function stepsOf(k){ const s = SCEN[k].steps; return typeof s === "function" ? s(variant) : s; }
+function summaryOf(k){ const s = SCEN[k].summary; return typeof s === "function" ? s(variant) : s; }
+const failStepper = new Stepper({steps:stepsOf(current), diagram:dFail, panel:document.getElementById("panel-fail"),
+  controls:document.getElementById("ctl-fail"), section:document.getElementById("failures"),
+  onChange:(i,n) => {
+    summaryEl.hidden = i !== n-1;
+    summaryEl.innerHTML = `<h3>In short</h3><dl>${summaryOf(current).map(r => `<dt>${r[0]}</dt><dd>${r[1]}</dd>`).join("")}</dl>`;
+  }});
+function chooseScenario(k){
+  current = k;
+  tabs.querySelectorAll(".tab").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.k === k)));
+  const v = SCEN[k].variants;
+  variantEl.hidden = !v;
+  if (v){
+    variantEl.innerHTML = `<span>Device:</span>` + Object.keys(v).map(key =>
+      `<button class="tab" type="button" data-v="${key}" aria-pressed="${key===variant}">${v[key]}</button>`).join("");
+    variantEl.querySelectorAll("button").forEach(b => b.addEventListener("click", () => { variant = b.dataset.v; chooseScenario(current); }));
+  } else variantEl.innerHTML = "";
+  failStepper.load(stepsOf(k));
+}
+tabs.innerHTML = ORDERED.map(k => `<button class="tab" type="button" data-k="${k}" aria-pressed="${k===current}">${SCEN[k].tab}</button>`).join("");
+tabs.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => chooseScenario(b.dataset.k)));
+chooseScenario(current);
+
+/* ---------- section 4: decisions ---------- */
+const DECISIONS = [
+  {t:"Core NATS for commands", s:"A command is fresh or doesn't happen.",
+   b:`<p><b>Why:</b> a lost command is harmless: it is sent again. A stored command is dangerous: it could run late, after a cancel or after someone moved the plate.</p>
+      <p><b>Instead of:</b> JetStream for commands, which would also force one ack timeout on jobs lasting from 2s to hours.</p>
+      <p><b>Watch out:</b> a timeout means unknown. In C1 a timed-out request arrived 20s late. <span class="tag t-meas">measured</span></p>`, see:"claimcrash"},
+  {t:"JetStream for events", s:"Facts must outlive the executor.",
+   b:`<p><b>Why:</b> what happened on an instrument must reach Postgres even if the executor is down. The driver retries until JetStream confirms; the executor acks only after its commit.</p>
+      <p><b>Not exactly once:</b> a duplicate is dropped by message id within 2 minutes, and applying a fact twice changes nothing.</p>
+      <p><b>Cost:</b> up to 30s of lag after a network cut (K62). <span class="tag t-meas">measured</span></p>`, see:"exec"},
+  {t:"Claim before run", s:"The one moment a cancel can still stop a job.",
+   b:`<p><b>Why:</b> the driver asks permission just before starting. The claim and a cancel take the same row lock, so exactly one wins.</p>
+      <p><b>Instead of:</b> commands that expire (depends on clocks, still races) or a cancel broadcast (still races).</p>
+      <p><b>Rests on:</b> one executor answering claims (K56).</p>`, see:"cancel"},
+  {t:"Stable job ids", s:"<code>&lt;run&gt;/&lt;step&gt;/&lt;attempt&gt;</code>, the unit of idempotency.",
+   b:`<p><b>Why:</b> a resend uses the same id, so it can't become a second attempt: the driver answers <code>known</code>. JetStream drops duplicates by it, and the S3 key is derived from it.</p>
+      <p>A new attempt is a deliberate decision by the retry policy, with a new id.</p>`, see:"claimcrash"},
+  {t:"The instrument's ledger is the evidence", s:"Times and outcomes come from it, not from messages.",
+   b:`<p><b>Why:</b> it is written before any physical work and survives restarts. A job missing from it never started; a job cut off by a restart is marked hung.</p>
+      <p>The driver reads the ledger, not Run's return value, because a hung Run never returns.</p>
+      <p><b>Limit:</b> not infallible. A failed end-of-job write turns into hung after a restart (K16).</p>`, see:"midcrash"},
+  {t:"S3 hash verification", s:"\"Completed on the instrument\" isn't enough for a read.",
+   b:`<p><b>Why:</b> the bytes exist only in the driver's memory until uploaded. The executor reads the object back from the key it derives, and completes the read only when its sha256 equals the ledger's.</p>
+      <p>A verified read is never undone (D2). A lost read stays open, not failed (D3).</p>`, see:"lost"},
+  {t:"Safe retry rules", s:"Retry only with a positive reason to think it's safe.",
+   b:`<ul><li><b>Failure:</b> only if the instrument marks it retryable.</li>
+      <li><b>Hang:</b> only on a device in <code>REPEAT_SAFE</code> (default: the plate reader).</li>
+      <li><b>Data lost:</b> re-read on a device in <code>REREAD_ON_DATA_LOSS</code> (default: the plate reader).</li>
+      <li>At most 3 attempts. No timers: wait for the instrument's own report.</li></ul>
+      <p>A step is decided by all its attempts: completed once any is verified, failed only when all have ended and no more will be made.</p>`, see:"hang"}
+];
+const cards = document.getElementById("cards");
+cards.innerHTML = DECISIONS.map(d => `<details class="card"><summary><div><b>${d.t}</b><span>${d.s}</span></div></summary>
+  <div class="body">${d.b}<p><button class="seeit" type="button" data-see="${d.see}">See it: ${SCEN[d.see].tab} →</button></p></div></details>`).join("");
+cards.querySelectorAll(".seeit").forEach(b => b.addEventListener("click", () => {
+  chooseScenario(b.dataset.see);
+  document.getElementById("failures").scrollIntoView({behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"});
+  tabs.querySelector(`[data-k="${b.dataset.see}"]`).focus({preventScroll:true});
+}));
+})();
+</script>
+</body>
+</html>

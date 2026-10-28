@@ -5,12 +5,16 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"sync"
+	"time"
 
 	"github.com/lib/pq"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/automata-tech/distributed-systems-interview/services/common/storage"
 )
@@ -33,21 +37,50 @@ type Executor struct {
 	db      *sql.DB
 	nc      *nats.Conn
 	storage *storage.Storage
+	policy  Policy // what may be repeated (D4); main sets it from the environment
+
+	claimSub  *nats.Subscription
+	consuming jetstream.ConsumeContext
+	closeOnce sync.Once
+
+	stop      context.CancelFunc
+	wg        sync.WaitGroup // the dispatch loop and the commands it is sending
+	wake      chan struct{}
+	sendMu    sync.Mutex
+	sending   map[string]bool      // job -> a command is out now
+	notBefore map[string]time.Time // job -> when it may be sent again
 }
 
 func NewExecutor(db *sql.DB, nc *nats.Conn, st *storage.Storage) *Executor {
-	return &Executor{db: db, nc: nc, storage: st}
+	return &Executor{db: db, nc: nc, storage: st, policy: defaultPolicy, wake: make(chan struct{}, 1),
+		sending: map[string]bool{}, notBefore: map[string]time.Time{}}
 }
 
 // Start is called once, when the executor process starts.
 func (e *Executor) Start(ctx context.Context) error {
-	// TODO
-	log.Printf("executor: started, but nothing talks to the drivers yet")
+	if err := e.listen(ctx); err != nil {
+		return err
+	}
+	loop, stop := context.WithCancel(context.Background())
+	e.stop = stop
+	e.wg.Add(2)
+	go e.dispatchLoop(loop)
+	go e.recheckLoop(loop)
+	log.Printf("executor: listening for claims and events, dispatching runs")
 	return nil
 }
 
-// Close is called once, when the executor process stops.
-func (e *Executor) Close() {}
+// Close is called once, when the executor process stops. Sending stops first,
+// so nothing new is dispatched while the last events are still being applied.
+func (e *Executor) Close() {
+	e.closeOnce.Do(func() {
+		if e.stop != nil {
+			e.stop()
+			e.wg.Wait()
+		}
+		e.stopListening()
+	})
+}
 
 func (e *Executor) CreateRun(ctx context.Context, workflowName string, steps []StepTemplate) (RunView, error) {
 	runID := "run-" + randomHex(6)
@@ -64,9 +97,13 @@ func (e *Executor) CreateRun(ctx context.Context, workflowName string, steps []S
 	for position, st := range steps {
 		// A nil slice would be stored as NULL, not as an empty array.
 		deps := append([]string{}, st.DependsOn...)
+		lifecycle, err := json.Marshal(NewStep(producesData(st.DeviceID)))
+		if err != nil {
+			return RunView{}, fmt.Errorf("encode step %s: %w", st.Name, err)
+		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO steps (run_id, name, position, device_id, depends_on) VALUES ($1, $2, $3, $4, $5)`,
-			runID, st.Name, position, st.DeviceID, pq.Array(deps)); err != nil {
+			`INSERT INTO steps (run_id, name, position, device_id, depends_on, lifecycle) VALUES ($1, $2, $3, $4, $5, $6)`,
+			runID, st.Name, position, st.DeviceID, pq.Array(deps), lifecycle); err != nil {
 			return RunView{}, fmt.Errorf("insert step %s: %w", st.Name, err)
 		}
 	}
@@ -82,14 +119,76 @@ func (e *Executor) StartRun(ctx context.Context, runID string) (RunView, error) 
 		RunRunning, runID, RunPending); err != nil {
 		return RunView{}, fmt.Errorf("start run %s: %w", runID, err)
 	}
-	// TODO: get the run going.
-	log.Printf("executor: run %s started, but nothing happens yet", runID)
+	e.poke()
 	return e.GetRun(ctx, runID)
 }
 
+// CancelRun records the cancel on every step of the run in one transaction, so
+// it is never half applied: what was not sent never will be, an attempt sent and
+// not claimed is cancelled, and no new attempt is made. What is claimed or
+// running is not stopped (D1); its evidence is still recorded, and the run ends
+// once nothing is in flight (finish). A run not started is cancelled at once; a
+// finished one is left as it is.
 func (e *Executor) CancelRun(ctx context.Context, runID string) (RunView, error) {
-	// TODO
-	return RunView{}, fmt.Errorf("cancel: %w", ErrNotImplemented)
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RunView{}, fmt.Errorf("cancel %s: %w", runID, err)
+	}
+	defer tx.Rollback()
+	var status string
+	err = tx.QueryRowContext(ctx, `SELECT status FROM runs WHERE id = $1 FOR UPDATE`, runID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RunView{}, ErrRunNotFound
+	}
+	if err != nil {
+		return RunView{}, fmt.Errorf("cancel %s: %w", runID, err)
+	}
+	if status != RunPending && status != RunRunning {
+		return e.GetRun(ctx, runID)
+	}
+
+	// Every step is locked, in position order (K12), before any is changed.
+	rows, err := tx.QueryContext(ctx, `SELECT name, lifecycle FROM steps WHERE run_id = $1 ORDER BY position FOR UPDATE`, runID)
+	if err != nil {
+		return RunView{}, fmt.Errorf("cancel %s: %w", runID, err)
+	}
+	var names []string
+	var steps []Step
+	for rows.Next() {
+		var name string
+		var raw []byte
+		if err := rows.Scan(&name, &raw); err != nil {
+			rows.Close()
+			return RunView{}, fmt.Errorf("cancel %s: %w", runID, err)
+		}
+		s, err := decodeStep(raw)
+		if err != nil {
+			rows.Close()
+			return RunView{}, fmt.Errorf("cancel %s/%s: %w", runID, name, err)
+		}
+		names, steps = append(names, name), append(steps, s)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return RunView{}, fmt.Errorf("cancel %s: %w", runID, err)
+	}
+	for i, s := range steps {
+		if s, changed := Apply(s, Cancel{}); changed {
+			if err := saveStep(ctx, tx, runID, names[i], s); err != nil {
+				return RunView{}, err
+			}
+		}
+	}
+	if status == RunPending {
+		if _, err := tx.ExecContext(ctx, `UPDATE runs SET status = $1, finished_at = now() WHERE id = $2`, RunCancelled, runID); err != nil {
+			return RunView{}, fmt.Errorf("cancel %s: %w", runID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return RunView{}, fmt.Errorf("cancel %s: %w", runID, err)
+	}
+	e.poke()
+	return e.GetRun(ctx, runID)
 }
 
 func (e *Executor) GetRun(ctx context.Context, runID string) (RunView, error) {
